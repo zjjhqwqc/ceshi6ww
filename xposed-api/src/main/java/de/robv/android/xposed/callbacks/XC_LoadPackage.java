@@ -1,7 +1,5 @@
 package de.robv.android.xposed.callbacks;
 
-import android.content.pm.ApplicationInfo;
-
 /**
  * 加载包回调
  */
@@ -16,8 +14,6 @@ public class XC_LoadPackage extends XCallback {
         public String processName;
         /** 类加载器 */
         public ClassLoader classLoader;
-        /** ApplicationInfo */
-        public ApplicationInfo appInfo;
         /** 是否是第一个应用 */
         public boolean isFirstApplication;
     }
