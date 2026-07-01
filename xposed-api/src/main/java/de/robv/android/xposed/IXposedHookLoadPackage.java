@@ -1,5 +1,7 @@
 package de.robv.android.xposed;
 
+import de.robv.android.xposed.callbacks.XC_LoadPackage;
+
 /**
  * Hook入口接口 - 模块必须实现此接口
  */
