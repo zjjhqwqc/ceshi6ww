@@ -5,6 +5,8 @@ import android.app.Activity;
 import android.app.Application;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -22,16 +24,24 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.AdapterView;
+import android.widget.BaseAdapter;
 import android.widget.Button;
 import android.widget.CompoundButton;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ListAdapter;
+import android.widget.ListView;
+import android.widget.PopupWindow;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
@@ -42,7 +52,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
  * 微信虚拟定位Xposed模块
- * 功能：长按微信首页右上角+按钮弹出设置面板，支持虚拟定位
+ * 功能：点击微信首页右上角+按钮，在弹出菜单中增加"定位设置"选项
  * 支持Android 10-16
  */
 public class Hook implements IXposedHookLoadPackage {
@@ -83,6 +93,13 @@ public class Hook implements IXposedHookLoadPackage {
     private static android.app.Dialog settingDialog = null;
     private static TextView gpsTextView = null;
 
+    // 是否已显示功能加载完成提示
+    private static boolean hasShownLoadedToast = false;
+
+    // 自定义菜单项ID
+    private static final int CUSTOM_MENU_ITEM_ID = 0x7F0F0001;
+    private static final String CUSTOM_MENU_TITLE = "定位设置";
+
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
         if (!TARGET_PACKAGE.equals(lpparam.packageName)) {
@@ -105,11 +122,20 @@ public class Hook implements IXposedHookLoadPackage {
 
                         // 注册Activity生命周期
                         registerActivityLifecycleCallbacks((Application) appContext);
+
+                        // 显示功能加载完成提示
+                        showLoadedToast();
                     }
                 });
 
-        // Hook 微信首页右上角+按钮
+        // 方案1：Hook MMListPopupWindow 注入菜单项（主要方案）
+        hookMMListPopupWindow(lpparam);
+
+        // 方案2：Hook PlusActionView 长按（备用方案）
         hookPlusActionView(lpparam);
+
+        // 方案3：Hook LauncherUI查找+按钮（备用方案2）
+        hookLauncherUI(lpparam);
 
         // Hook 腾讯地图定位
         hookTencentLocation(lpparam);
@@ -120,8 +146,355 @@ public class Hook implements IXposedHookLoadPackage {
         Log.e(TAG, "========== 所有Hook点注册完成 ==========");
     }
 
+    // 显示功能加载完成提示
+    private void showLoadedToast() {
+        if (hasShownLoadedToast) return;
+        hasShownLoadedToast = true;
+
+        uiHandler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Toast.makeText(appContext, "功能加载完成", Toast.LENGTH_SHORT).show();
+                    Log.e(TAG, "功能加载完成 - Toast已显示");
+                } catch (Throwable t) {
+                    Log.e(TAG, "显示加载完成Toast失败", t);
+                }
+            }
+        }, 3000);
+    }
+
     // ==========================================
-    // Hook 微信右上角+按钮
+    // 方案1：Hook MMListPopupWindow 注入菜单项
+    // ==========================================
+    private void hookMMListPopupWindow(XC_LoadPackage.LoadPackageParam lpparam) {
+        try {
+            final Class<?> popupWindowClass = XposedHelpers.findClass(
+                    "com.tencent.mm.ui.base.MMListPopupWindow", lpparam.classLoader);
+            Log.e(TAG, "找到MMListPopupWindow类");
+
+            // Hook show方法
+            XposedBridge.hookAllMethods(popupWindowClass, "show", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    try {
+                        Object popupWindow = param.thisObject;
+                        Log.e(TAG, "MMListPopupWindow.show() 被调用");
+
+                        // 尝试获取ListView
+                        ListView listView = getListViewFromPopup(popupWindow, popupWindowClass);
+                        if (listView == null) {
+                            Log.e(TAG, "无法获取ListView");
+                            return;
+                        }
+
+                        // 获取adapter
+                        ListAdapter adapter = listView.getAdapter();
+                        if (adapter == null) {
+                            Log.e(TAG, "Adapter为null");
+                            return;
+                        }
+
+                        int count = adapter.getCount();
+                        Log.e(TAG, "当前菜单项数量: " + count);
+
+                        // 检查是否是加号菜单（通常4个选项：发起群聊、添加朋友、扫一扫、收付款）
+                        if (count >= 3 && count <= 6) {
+                            // 检查是否已经注入过
+                            boolean alreadyInjected = false;
+                            for (int i = 0; i < count; i++) {
+                                Object item = adapter.getItem(i);
+                                if (item != null && isCustomMenuItem(item)) {
+                                    alreadyInjected = true;
+                                    break;
+                                }
+                            }
+
+                            if (!alreadyInjected) {
+                                Log.e(TAG, "检测到加号菜单，准备注入定位设置项");
+                                injectMenuItemToListView(listView, adapter);
+                            }
+                        }
+                    } catch (Throwable t) {
+                        Log.e(TAG, "Hook MMListPopupWindow.show异常", t);
+                    }
+                }
+            });
+
+            Log.e(TAG, "MMListPopupWindow Hook成功");
+        } catch (Throwable t) {
+            Log.e(TAG, "MMListPopupWindow Hook失败: " + t.getMessage());
+            // 尝试Hook标准的ListPopupWindow
+            hookStandardListPopupWindow(lpparam);
+        }
+    }
+
+    // Hook标准ListPopupWindow（备用）
+    private void hookStandardListPopupWindow(XC_LoadPackage.LoadPackageParam lpparam) {
+        try {
+            final Class<?> popupWindowClass = XposedHelpers.findClass(
+                    "androidx.appcompat.widget.ListPopupWindow", lpparam.classLoader);
+            Log.e(TAG, "找到ListPopupWindow类");
+
+            XposedBridge.hookAllMethods(popupWindowClass, "show", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    try {
+                        Object popupWindow = param.thisObject;
+                        ListView listView = (ListView) XposedHelpers.callMethod(popupWindow, "getListView");
+                        if (listView == null) return;
+
+                        ListAdapter adapter = listView.getAdapter();
+                        if (adapter == null) return;
+
+                        int count = adapter.getCount();
+                        if (count >= 3 && count <= 6) {
+                            boolean alreadyInjected = false;
+                            for (int i = 0; i < count; i++) {
+                                Object item = adapter.getItem(i);
+                                if (item != null && isCustomMenuItem(item)) {
+                                    alreadyInjected = true;
+                                    break;
+                                }
+                            }
+                            if (!alreadyInjected) {
+                                Log.e(TAG, "ListPopupWindow: 注入定位设置项");
+                                injectMenuItemToListView(listView, adapter);
+                            }
+                        }
+                    } catch (Throwable t) {
+                        Log.e(TAG, "ListPopupWindow.show hook异常", t);
+                    }
+                }
+            });
+
+            Log.e(TAG, "ListPopupWindow Hook成功");
+        } catch (Throwable t) {
+            Log.e(TAG, "ListPopupWindow Hook失败: " + t.getMessage());
+        }
+    }
+
+    // 从PopupWindow获取ListView
+    private ListView getListViewFromPopup(Object popupWindow, Class<?> popupClass) {
+        try {
+            // 尝试直接调用getListView方法
+            Method getListViewMethod = null;
+            for (Method m : popupClass.getDeclaredMethods()) {
+                if (m.getReturnType() == ListView.class && m.getParameterTypes().length == 0) {
+                    m.setAccessible(true);
+                    getListViewMethod = m;
+                    break;
+                }
+            }
+            if (getListViewMethod != null) {
+                return (ListView) getListViewMethod.invoke(popupWindow);
+            }
+
+            // 尝试通过字段获取
+            for (Field f : popupClass.getDeclaredFields()) {
+                if (ListView.class.isAssignableFrom(f.getType())) {
+                    f.setAccessible(true);
+                    return (ListView) f.get(popupWindow);
+                }
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "获取ListView失败", t);
+        }
+        return null;
+    }
+
+    // 检查是否是我们的自定义菜单项
+    private boolean isCustomMenuItem(Object item) {
+        try {
+            // 尝试通过toString判断
+            String str = item.toString();
+            if (str.contains(CUSTOM_MENU_TITLE)) {
+                return true;
+            }
+            // 尝试获取title字段
+            for (Field f : item.getClass().getDeclaredFields()) {
+                if (f.getType() == String.class) {
+                    f.setAccessible(true);
+                    Object val = f.get(item);
+                    if (val != null && val.toString().equals(CUSTOM_MENU_TITLE)) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    // 向ListView注入菜单项（使用FooterView方案，不影响原有菜单项）
+    private void injectMenuItemToListView(ListView listView, final ListAdapter originalAdapter) {
+        try {
+            final Context context = listView.getContext();
+
+            // 检查是否已经添加过FooterView
+            int footerViewCount = listView.getFooterViewsCount();
+            if (footerViewCount > 0) {
+                Log.e(TAG, "已存在FooterView，跳过注入");
+                return;
+            }
+
+            // 创建自定义菜单项View
+            View customItemView = createCustomMenuItemView(context);
+
+            // 设置点击事件
+            customItemView.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    Log.e(TAG, "点击了定位设置菜单项");
+                    // 关闭弹窗
+                    try {
+                        // 向上查找PopupWindow并关闭
+                        View parent = (View) v.getParent();
+                        while (parent != null) {
+                            Object lp = parent.getTag();
+                            if (lp instanceof PopupWindow) {
+                                ((PopupWindow) lp).dismiss();
+                                break;
+                            }
+                            Object p = parent.getParent();
+                            if (p instanceof View) {
+                                parent = (View) p;
+                            } else {
+                                // 尝试通过context关闭
+                                if (context instanceof Activity) {
+                                    // 不关闭activity，只关闭弹窗
+                                }
+                                break;
+                            }
+                        }
+                    } catch (Throwable t) {
+                        Log.e(TAG, "关闭弹窗失败", t);
+                    }
+                    // 显示设置面板
+                    showSettingPanel(context);
+                }
+            });
+
+            // 添加分隔线
+            View divider = new View(context);
+            divider.setLayoutParams(new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 1));
+            divider.setBackgroundColor(0xFFE0E0E0);
+
+            // 添加FooterView（分隔线 + 自定义项）
+            listView.addFooterView(divider);
+            listView.addFooterView(customItemView);
+
+            Log.e(TAG, "菜单项注入成功（FooterView方案）");
+        } catch (Throwable t) {
+            Log.e(TAG, "注入菜单项失败，尝试备用方案", t);
+            // 备用方案：直接在PopupWindow底部添加按钮
+            injectMenuItemByAddingView(listView, originalAdapter);
+        }
+    }
+
+    // 备用方案：直接在PopupWindow中添加View
+    private void injectMenuItemByAddingView(ListView listView, ListAdapter originalAdapter) {
+        try {
+            final Context context = listView.getContext();
+            View parent = (View) listView.getParent();
+
+            if (parent instanceof ViewGroup) {
+                ViewGroup parentGroup = (ViewGroup) parent;
+
+                // 创建自定义按钮
+                LinearLayout btnLayout = new LinearLayout(context);
+                btnLayout.setOrientation(LinearLayout.HORIZONTAL);
+                btnLayout.setGravity(Gravity.CENTER_VERTICAL);
+                btnLayout.setPadding(dp2px(context, 16), dp2px(context, 12),
+                        dp2px(context, 16), dp2px(context, 12));
+                btnLayout.setBackgroundColor(Color.WHITE);
+                btnLayout.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        Log.e(TAG, "点击了定位设置（备用方案）");
+                        showSettingPanel(context);
+                    }
+                });
+
+                TextView iconView = new TextView(context);
+                iconView.setText("📍");
+                iconView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+                LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                iconParams.rightMargin = dp2px(context, 12);
+                iconView.setLayoutParams(iconParams);
+                btnLayout.addView(iconView);
+
+                TextView textView = new TextView(context);
+                textView.setText(CUSTOM_MENU_TITLE);
+                textView.setTextColor(0xFF333333);
+                textView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+                btnLayout.addView(textView);
+
+                // 添加到父布局底部
+                ViewGroup.LayoutParams btnParams = new ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                parentGroup.addView(btnLayout, btnParams);
+
+                Log.e(TAG, "备用方案注入成功");
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "备用方案也失败", t);
+        }
+    }
+
+    // 创建自定义菜单项View
+    private View createCustomMenuItemView(Context context) {
+        LinearLayout layout = new LinearLayout(context);
+        layout.setOrientation(LinearLayout.HORIZONTAL);
+        layout.setGravity(Gravity.CENTER_VERTICAL);
+        layout.setPadding(dp2px(context, 16), dp2px(context, 12), dp2px(context, 16), dp2px(context, 12));
+        layout.setBackgroundColor(Color.WHITE);
+
+        // 图标（用文字代替）
+        TextView iconView = new TextView(context);
+        iconView.setText("📍");
+        iconView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        iconParams.rightMargin = dp2px(context, 12);
+        iconView.setLayoutParams(iconParams);
+        layout.addView(iconView);
+
+        // 文字
+        TextView textView = new TextView(context);
+        textView.setText(CUSTOM_MENU_TITLE);
+        textView.setTextColor(0xFF333333);
+        textView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        layout.addView(textView);
+
+        return layout;
+    }
+
+    // 关闭PopupWindow
+    private void dismissPopupWindow(AdapterView<?> parent) {
+        try {
+            // 向上查找PopupWindow
+            View v = (View) parent.getParent();
+            while (v != null) {
+                if (v.getTag() != null && v.getTag() instanceof PopupWindow) {
+                    ((PopupWindow) v.getTag()).dismiss();
+                    return;
+                }
+                Object parentObj = v.getParent();
+                if (parentObj instanceof View) {
+                    v = (View) parentObj;
+                } else {
+                    break;
+                }
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "关闭PopupWindow失败", t);
+        }
+    }
+
+    // ==========================================
+    // 方案2：Hook 微信右上角+按钮（长按备用）
     // ==========================================
     private void hookPlusActionView(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
@@ -145,8 +518,7 @@ public class Hook implements IXposedHookLoadPackage {
             }
 
             if (plusActionViewClass == null) {
-                Log.e(TAG, "未找到PlusActionView类，尝试Hook LauncherUI");
-                hookLauncherUI(lpparam);
+                Log.e(TAG, "未找到PlusActionView类");
                 return;
             }
 
@@ -223,17 +595,18 @@ public class Hook implements IXposedHookLoadPackage {
         });
     }
 
-    // Hook LauncherUI（备用方案）
+    // ==========================================
+    // 方案3：Hook LauncherUI（备用方案2）
+    // ==========================================
     private void hookLauncherUI(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
             XposedHelpers.findAndHookMethod("com.tencent.mm.ui.LauncherUI",
-                    lpparam.classLoader, "onCreate", Bundle.class,
+                    lpparam.classLoader, "onResume",
                     new XC_MethodHook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        protected void afterHookedMethod(final MethodHookParam param) throws Throwable {
                             final Activity activity = (Activity) param.thisObject;
                             currentActivity = activity;
-                            Log.e(TAG, "LauncherUI onCreate");
 
                             uiHandler.postDelayed(new Runnable() {
                                 @Override
@@ -351,6 +724,12 @@ public class Hook implements IXposedHookLoadPackage {
         }
 
         final Context ctx = context;
+
+        // 如果已有dialog且正在显示，先关闭
+        if (settingDialog != null && settingDialog.isShowing()) {
+            settingDialog.dismiss();
+            settingDialog = null;
+        }
 
         // 创建Dialog
         final android.app.Dialog dialog = new android.app.Dialog(ctx);
@@ -497,177 +876,206 @@ public class Hook implements IXposedHookLoadPackage {
         scrollView.addView(mainLayout);
 
         dialog.setContentView(scrollView);
-        dialog.show();
 
-        // 设置Dialog尺寸
+        // 设置窗口大小
         WindowManager.LayoutParams lp = dialog.getWindow().getAttributes();
-        DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
-        lp.width = (int) (dm.widthPixels * 0.9);
-        lp.height = (int) (dm.heightPixels * 0.75);
+        lp.width = WindowManager.LayoutParams.MATCH_PARENT;
+        lp.height = WindowManager.LayoutParams.WRAP_CONTENT;
         dialog.getWindow().setAttributes(lp);
 
         settingDialog = dialog;
+        dialog.show();
 
-        // 初始化可见性
-        updateSettingPanelVisibility();
+        Log.e(TAG, "设置面板已显示");
     }
 
     // 更新设置面板可见性
     private void updateSettingPanelVisibility() {
-        if (settingDialog == null || gpsTextView == null) return;
-        try {
-            View contentView = settingDialog.getWindow().getDecorView();
-            // 简单处理：始终显示所有内容
-        } catch (Throwable ignored) {}
+        // 这里可以控制某些控件的显示隐藏
+        updateGpsText();
     }
 
-    // 更新GPS文本显示
-    @SuppressLint("SetTextI18n")
+    // 更新GPS文字显示
     private void updateGpsText() {
         if (gpsTextView != null) {
             gpsTextView.setText("纬度：" + latitude + "\n经度：" + longitude + "\n地点：" + gpsPlace);
         }
     }
 
+    // 创建开关行
+    private LinearLayout createSwitchRow(Context context, String title, boolean checked,
+                                          CompoundButton.OnCheckedChangeListener listener) {
+        LinearLayout layout = new LinearLayout(context);
+        layout.setOrientation(LinearLayout.HORIZONTAL);
+        layout.setGravity(Gravity.CENTER_VERTICAL);
+        layout.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        TextView tv = new TextView(context);
+        tv.setText(title);
+        tv.setTextColor(0xFF333333);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        LinearLayout.LayoutParams tvParams = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        tv.setLayoutParams(tvParams);
+        layout.addView(tv);
+
+        android.widget.Switch sw = new android.widget.Switch(context);
+        sw.setChecked(checked);
+        sw.setOnCheckedChangeListener(listener);
+        layout.addView(sw);
+
+        return layout;
+    }
+
+    // 创建标签
+    private TextView createLabel(Context context, String text) {
+        TextView tv = new TextView(context);
+        tv.setText(text);
+        tv.setTextColor(0xFF666666);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        tv.setPadding(0, dp2px(context, 8), 0, dp2px(context, 4));
+        return tv;
+    }
+
+    // 创建输入框
+    private EditText createEditText(Context context, String text, String hint) {
+        EditText et = new EditText(context);
+        et.setText(text);
+        et.setHint(hint);
+        et.setTextColor(0xFF333333);
+        et.setHintTextColor(0xFFAAAAAA);
+        et.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        et.setPadding(dp2px(context, 10), dp2px(context, 8), dp2px(context, 10), dp2px(context, 8));
+        et.setBackgroundColor(0xFFF0F0F0);
+        et.setSingleLine(true);
+        return et;
+    }
+
     // ==========================================
     // 地图选点
     // ==========================================
-    @SuppressLint("SetJavaScriptEnabled")
-    private void showMapPicker(Context ctx, final android.app.Dialog parentDialog) {
-        final android.app.Dialog mapDialog = new android.app.Dialog(ctx);
+    private void showMapPicker(final Context context, final android.app.Dialog parentDialog) {
+        final android.app.Dialog mapDialog = new android.app.Dialog(context);
         mapDialog.setTitle("地图选点");
 
-        LinearLayout container = new LinearLayout(ctx);
-        container.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout layout = new LinearLayout(context);
+        layout.setOrientation(LinearLayout.VERTICAL);
 
-        WebView webView = new WebView(ctx);
-        webView.setLayoutParams(new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.MATCH_PARENT));
+        // 搜索栏
+        final EditText searchEdit = new EditText(context);
+        searchEdit.setHint("搜索地点");
+        searchEdit.setPadding(dp2px(context, 12), dp2px(context, 10), dp2px(context, 12), dp2px(context, 10));
+        searchEdit.setBackgroundColor(0xFFF5F5F5);
+        layout.addView(searchEdit);
 
-        WebSettings settings = webView.getSettings();
-        settings.setJavaScriptEnabled(true);
-        settings.setDomStorageEnabled(true);
-        settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+        // WebView显示腾讯地图
+        final WebView webView = new WebView(context);
+        WebSettings webSettings = webView.getSettings();
+        webSettings.setJavaScriptEnabled(true);
+        webSettings.setDomStorageEnabled(true);
+        webSettings.setAllowFileAccess(true);
+
+        // 加载腾讯地图选点页面
+        String mapUrl = "https://apis.map.qq.com/tools/locpicker?search=1&type=0&backurl=http://callback&key=OB4BZ-D4W3U-B7VVO-4PJWW-6TKDJ-WPB77&referer=myapp";
+        webView.loadUrl(mapUrl);
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                return handleMapUrl(request.getUrl().toString(), mapDialog, ctx);
-            }
+                String url = request.getUrl().toString();
+                Log.e(TAG, "URL: " + url);
 
-            @Override
-            public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                return handleMapUrl(url, mapDialog, ctx);
+                // 检测选点回调
+                if (url.startsWith("http://callback")) {
+                    try {
+                        Uri uri = Uri.parse(url);
+                        String latStr = uri.getQueryParameter("latng");
+                        String addr = uri.getQueryParameter("addr");
+                        String poi = uri.getQueryParameter("poi");
+
+                        if (latStr != null && latStr.contains(",")) {
+                            String[] parts = latStr.split(",");
+                            if (parts.length >= 2) {
+                                latitude = parts[0];
+                                longitude = parts[1];
+                                if (poi != null && !poi.isEmpty()) {
+                                    gpsPlace = poi;
+                                } else if (addr != null) {
+                                    gpsPlace = addr;
+                                }
+                                savePrefs();
+                                updateXcxCoordinates();
+                                updateGpsText();
+                                Toast.makeText(context, "位置已选择: " + gpsPlace, Toast.LENGTH_SHORT).show();
+                                mapDialog.dismiss();
+                                return true;
+                            }
+                        }
+                    } catch (Throwable t) {
+                        Log.e(TAG, "解析选点结果失败", t);
+                    }
+                    return true;
+                }
+                return super.shouldOverrideUrlLoading(view, request);
             }
         });
 
-        // 腾讯地图选点组件
-        String mapUrl = "https://mapapi.qq.com/web/mapComponents/locationPicker/v/index.html"
-                + "?search=1&type=0&backurl=https://www.baidu.com"
-                + "&key=I6UBZ-RR23W-OIWRS-RGJ5T-XDIN3-FFB3C";
-        webView.loadUrl(mapUrl);
+        LinearLayout.LayoutParams webParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
+        webView.setLayoutParams(webParams);
+        layout.addView(webView);
 
-        container.addView(webView);
-        mapDialog.setContentView(container);
-        mapDialog.show();
+        // 取消按钮
+        Button cancelBtn = new Button(context);
+        cancelBtn.setText("取消");
+        cancelBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                mapDialog.dismiss();
+            }
+        });
+        layout.addView(cancelBtn);
+
+        mapDialog.setContentView(layout);
 
         WindowManager.LayoutParams lp = mapDialog.getWindow().getAttributes();
-        DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
-        lp.width = (int) (dm.widthPixels * 0.95);
-        lp.height = (int) (dm.heightPixels * 0.9);
+        lp.width = WindowManager.LayoutParams.MATCH_PARENT;
+        lp.height = WindowManager.LayoutParams.MATCH_PARENT;
         mapDialog.getWindow().setAttributes(lp);
 
-        mapDialog.setOnDismissListener(dialog -> {
-            try {
-                webView.destroy();
-            } catch (Throwable ignored) {}
-        });
-    }
-
-    // 处理地图选点URL回调
-    private boolean handleMapUrl(String url, android.app.Dialog dialog, Context ctx) {
-        if (url.startsWith("https://www.baidu.com")) {
-            try {
-                Uri uri = Uri.parse(url);
-                String latng = uri.getQueryParameter("latng");
-                String addr = uri.getQueryParameter("addr");
-                String name = uri.getQueryParameter("name");
-
-                if (latng != null && !latng.isEmpty()) {
-                    String[] parts = latng.split(",");
-                    if (parts.length >= 2) {
-                        latitude = parts[0].trim();
-                        longitude = parts[1].trim();
-                        gpsPlace = (addr != null ? addr : "") + (name != null ? "," + name : "");
-                        if (gpsPlace.startsWith(",")) gpsPlace = gpsPlace.substring(1);
-
-                        savePrefs();
-                        updateXcxCoordinates();
-                        updateGpsText();
-
-                        Toast.makeText(ctx, "已选择位置: " + gpsPlace, Toast.LENGTH_SHORT).show();
-                    }
-                }
-            } catch (Throwable t) {
-                Log.e(TAG, "解析地图选点结果失败", t);
-                Toast.makeText(ctx, "获取坐标失败", Toast.LENGTH_SHORT).show();
-            }
-            dialog.dismiss();
-            return true;
-        }
-        return false;
+        mapDialog.show();
     }
 
     // ==========================================
     // 获取当前位置
     // ==========================================
-    @SuppressLint("MissingPermission")
-    private void getCurrentLocation(Context ctx) {
+    private void getCurrentLocation(Context context) {
         try {
             android.location.LocationManager lm = (android.location.LocationManager)
-                    ctx.getSystemService(Context.LOCATION_SERVICE);
-            if (lm == null) {
-                Toast.makeText(ctx, "无法获取位置服务", Toast.LENGTH_SHORT).show();
-                return;
-            }
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                if (ctx.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
-                        != android.content.pm.PackageManager.PERMISSION_GRANTED
-                        && ctx.checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION)
-                        != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                    Toast.makeText(ctx, "缺少位置权限", Toast.LENGTH_SHORT).show();
-                    return;
-                }
-            }
-
-            android.location.Location loc = null;
-            try {
-                loc = lm.getLastKnownLocation(android.location.LocationManager.GPS_PROVIDER);
-            } catch (Exception ignored) {}
-            if (loc == null) {
+                    context.getSystemService(Context.LOCATION_SERVICE);
+            if (lm != null) {
+                android.location.Location loc = null;
                 try {
                     loc = lm.getLastKnownLocation(android.location.LocationManager.NETWORK_PROVIDER);
-                } catch (Exception ignored) {}
+                } catch (SecurityException e) {
+                    Log.e(TAG, "无定位权限");
+                }
+                if (loc == null) {
+                    try {
+                        loc = lm.getLastKnownLocation(android.location.LocationManager.GPS_PROVIDER);
+                    } catch (SecurityException e) {
+                        // ignore
+                    }
+                }
+                if (loc != null) {
+                    latitude = String.valueOf(loc.getLatitude());
+                    longitude = String.valueOf(loc.getLongitude());
+                    gpsPlace = "当前位置";
+                    Log.e(TAG, "获取当前位置成功: " + latitude + ", " + longitude);
+                }
             }
-            if (loc == null) {
-                try {
-                    loc = lm.getLastKnownLocation(android.location.LocationManager.PASSIVE_PROVIDER);
-                } catch (Exception ignored) {}
-            }
-
-            if (loc != null) {
-                latitude = String.valueOf(loc.getLatitude());
-                longitude = String.valueOf(loc.getLongitude());
-                gpsPlace = "当前位置";
-                Toast.makeText(ctx, "已获取当前位置", Toast.LENGTH_SHORT).show();
-            } else {
-                Toast.makeText(ctx, "无法获取当前位置，请先开启定位", Toast.LENGTH_SHORT).show();
-            }
-        } catch (SecurityException se) {
-            Toast.makeText(ctx, "位置权限被拒绝", Toast.LENGTH_SHORT).show();
         } catch (Throwable t) {
-            Toast.makeText(ctx, "获取位置失败: " + t.getMessage(), Toast.LENGTH_SHORT).show();
             Log.e(TAG, "获取当前位置失败", t);
         }
     }
@@ -677,124 +1085,64 @@ public class Hook implements IXposedHookLoadPackage {
     // ==========================================
     private void hookTencentLocation(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
-            String[] managerClassNames = {
-                    "com.tencent.map.geolocation.sapp.TencentLocationManager",
+            // 尝试Hook腾讯地图定位类
+            String[] tencentLocationClasses = {
                     "com.tencent.map.geolocation.TencentLocationManager",
                     "com.tencent.location.TencentLocationManager"
             };
 
-            Class<?> managerClass = null;
-            for (String className : managerClassNames) {
+            Class<?> locationManagerClass = null;
+            for (String className : tencentLocationClasses) {
                 try {
-                    managerClass = XposedHelpers.findClass(className, lpparam.classLoader);
-                    Log.e(TAG, "找到腾讯定位Manager类: " + className);
+                    locationManagerClass = XposedHelpers.findClass(className, lpparam.classLoader);
+                    Log.e(TAG, "找到腾讯定位类: " + className);
                     break;
-                } catch (Throwable ignored) {}
-            }
-
-            if (managerClass == null) {
-                Log.e(TAG, "未找到腾讯定位Manager类");
-                return;
-            }
-
-            // Hook单次定位
-            try {
-                XposedBridge.hookAllMethods(managerClass, "requestSingleFreshLocation",
-                        new XC_MethodHook() {
-                            @Override
-                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                hookLocationCallback(param);
-                            }
-                        });
-                Log.e(TAG, "Hook requestSingleFreshLocation成功");
-            } catch (Throwable t) {
-                Log.e(TAG, "Hook requestSingleFreshLocation失败", t);
-            }
-
-            // Hook持续定位
-            try {
-                XposedBridge.hookAllMethods(managerClass, "requestLocationUpdates",
-                        new XC_MethodHook() {
-                            @Override
-                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                hookLocationCallback(param);
-                            }
-                        });
-                Log.e(TAG, "Hook requestLocationUpdates成功");
-            } catch (Throwable t) {
-                Log.e(TAG, "Hook requestLocationUpdates失败", t);
-            }
-
-            // Hook requestLocation（某些版本）
-            try {
-                XposedBridge.hookAllMethods(managerClass, "requestLocation",
-                        new XC_MethodHook() {
-                            @Override
-                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                hookLocationCallback(param);
-                            }
-                        });
-                Log.e(TAG, "Hook requestLocation成功");
-            } catch (Throwable t) {
-                Log.e(TAG, "Hook requestLocation失败", t);
-            }
-
-            Log.e(TAG, "腾讯定位Hook注册完成");
-        } catch (Throwable t) {
-            Log.e(TAG, "腾讯定位Hook异常", t);
-        }
-    }
-
-    // Hook定位回调
-    private void hookLocationCallback(XC_MethodHook.MethodHookParam param) {
-        try {
-            // 从参数中找到回调对象
-            Object callback = null;
-            for (Object arg : param.args) {
-                if (arg != null && isLocationCallback(arg)) {
-                    callback = arg;
-                    break;
+                } catch (Throwable t) {
+                    // 继续尝试下一个
                 }
             }
 
-            if (callback == null) {
+            if (locationManagerClass == null) {
+                Log.e(TAG, "未找到腾讯定位类");
                 return;
             }
 
-            Class<?> callbackClass = callback.getClass();
-            String className = callbackClass.getName();
+            // Hook requestSingleFreshLocation (单次定位)
+            try {
+                Method[] methods = locationManagerClass.getDeclaredMethods();
+                for (final Method method : methods) {
+                    String name = method.getName();
+                    if (name.contains("requestSingle") || name.contains("requestLocation")
+                            || name.contains("getLocation") || name.contains("request")) {
+                        if (method.getParameterTypes().length >= 2) {
+                            XposedBridge.hookMethod(method, new XC_MethodHook() {
+                                @Override
+                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                    if (!locationEnabled) return;
 
-            // 防重复Hook
-            synchronized (hookedClasses) {
-                if (hookedClasses.contains(className)) {
-                    return;
-                }
-                hookedClasses.add(className);
-            }
+                                    Log.e(TAG, "腾讯定位方法被调用: " + method.getName());
 
-            Log.e(TAG, "找到定位回调类: " + className);
-
-            // 查找onLocationChanged方法
-            Method onLocationChanged = findOnLocationChangedMethod(callbackClass);
-            if (onLocationChanged == null) {
-                Log.e(TAG, "未找到onLocationChanged方法");
-                return;
-            }
-
-            final Method finalMethod = onLocationChanged;
-            XposedBridge.hookMethod(onLocationChanged, new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    // Hook定位结果对象
-                    if (param.args != null && param.args.length > 0 && param.args[0] != null) {
-                        hookLocationResult(param.args[0]);
+                                    // 查找回调参数
+                                    for (int i = 0; i < param.args.length; i++) {
+                                        Object arg = param.args[i];
+                                        if (arg != null && isLocationCallback(arg)) {
+                                            Log.e(TAG, "找到定位回调，准备Hook回调类");
+                                            hookLocationCallback(arg);
+                                            break;
+                                        }
+                                    }
+                                }
+                            });
+                        }
                     }
                 }
-            });
+            } catch (Throwable t) {
+                Log.e(TAG, "Hook腾讯定位方法失败", t);
+            }
 
-            Log.e(TAG, "Hook onLocationChanged成功: " + finalMethod.getName());
+            Log.e(TAG, "腾讯地图定位Hook完成");
         } catch (Throwable t) {
-            Log.e(TAG, "Hook定位回调失败", t);
+            Log.e(TAG, "Hook腾讯地图定位失败", t);
         }
     }
 
@@ -802,231 +1150,181 @@ public class Hook implements IXposedHookLoadPackage {
     private boolean isLocationCallback(Object obj) {
         if (obj == null) return false;
         Class<?> clazz = obj.getClass();
-        // 检查是否有onLocationChanged方法
-        for (Method method : clazz.getDeclaredMethods()) {
-            if ("onLocationChanged".equals(method.getName())) {
-                return true;
-            }
-        }
-        // 检查接口
-        for (Class<?> iface : clazz.getInterfaces()) {
-            if (iface.getName().contains("LocationListener") ||
-                    iface.getName().contains("TencentLocationListener")) {
-                return true;
-            }
-        }
-        return false;
+        String name = clazz.getName();
+        return name.contains("TencentLocationListener")
+                || name.contains("LocationListener")
+                || name.contains("Callback")
+                || name.contains("listener");
     }
 
-    // 查找onLocationChanged方法
-    private Method findOnLocationChangedMethod(Class<?> clazz) {
+    // Hook定位回调类
+    private void hookLocationCallback(final Object callback) {
         try {
-            for (Method method : clazz.getDeclaredMethods()) {
-                if ("onLocationChanged".equals(method.getName())) {
-                    method.setAccessible(true);
-                    return method;
+            String className = callback.getClass().getName();
+            if (hookedClasses.contains(className)) {
+                return;
+            }
+            hookedClasses.add(className);
+
+            XposedBridge.hookAllMethods(callback.getClass(),
+                    "onLocationChanged", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            if (!locationEnabled) return;
+
+                            Log.e(TAG, "定位回调onLocationChanged被调用");
+
+                            // 修改位置参数
+                            Object location = param.args[0];
+                            if (location != null) {
+                                fakeTencentLocation(location);
+                            }
+                        }
+                    });
+
+            Log.e(TAG, "定位回调Hook成功: " + className);
+        } catch (Throwable t) {
+            Log.e(TAG, "Hook定位回调失败", t);
+        }
+    }
+
+    // 修改腾讯定位对象
+    private void fakeTencentLocation(Object location) {
+        try {
+            Class<?> clazz = location.getClass();
+            double lat = Double.parseDouble(latitude);
+            double lng = Double.parseDouble(longitude);
+
+            // 小程序使用GCJ02坐标
+            if (xcxEnabled && xcxLat != 0) {
+                lat = xcxLat;
+                lng = xcxLng;
+            }
+
+            // 尝试设置纬度
+            try {
+                Field latField = findFieldByType(clazz, double.class, "lat");
+                if (latField != null) {
+                    latField.setAccessible(true);
+                    latField.setDouble(location, lat);
+                    Log.e(TAG, "设置纬度成功: " + lat);
+                }
+            } catch (Throwable t) {
+                // 尝试其他方式
+            }
+
+            // 尝试设置经度
+            try {
+                Field lngField = findFieldByType(clazz, double.class, "lng");
+                if (lngField != null) {
+                    lngField.setAccessible(true);
+                    lngField.setDouble(location, lng);
+                    Log.e(TAG, "设置经度成功: " + lng);
+                }
+            } catch (Throwable t) {
+                // 尝试其他方式
+            }
+
+            // 尝试通过setter方法
+            try {
+                Method[] methods = clazz.getDeclaredMethods();
+                for (Method method : methods) {
+                    String name = method.getName();
+                    if ((name.equals("setLatitude") || name.equals("setLat"))
+                            && method.getParameterTypes().length == 1
+                            && method.getParameterTypes()[0] == double.class) {
+                        method.setAccessible(true);
+                        method.invoke(location, lat);
+                        Log.e(TAG, "通过setter设置纬度成功");
+                    }
+                    if ((name.equals("setLongitude") || name.equals("setLng"))
+                            && method.getParameterTypes().length == 1
+                            && method.getParameterTypes()[0] == double.class) {
+                        method.setAccessible(true);
+                        method.invoke(location, lng);
+                        Log.e(TAG, "通过setter设置经度成功");
+                    }
+                }
+            } catch (Throwable t) {
+                Log.e(TAG, "通过setter设置位置失败", t);
+            }
+
+        } catch (Throwable t) {
+            Log.e(TAG, "修改定位对象失败", t);
+        }
+    }
+
+    // 按类型和名称关键字查找字段
+    private Field findFieldByType(Class<?> clazz, Class<?> type, String keyword) {
+        try {
+            Field[] fields = clazz.getDeclaredFields();
+            for (Field field : fields) {
+                if (field.getType() == type) {
+                    String name = field.getName().toLowerCase();
+                    if (name.contains(keyword)) {
+                        return field;
+                    }
                 }
             }
-            // 检查父类和接口
+            // 尝试父类
             Class<?> superClass = clazz.getSuperclass();
             if (superClass != null && !superClass.equals(Object.class)) {
-                Method parentMethod = findOnLocationChangedMethod(superClass);
-                if (parentMethod != null) return parentMethod;
-            }
-            for (Class<?> iface : clazz.getInterfaces()) {
-                Method ifaceMethod = findOnLocationChangedMethod(iface);
-                if (ifaceMethod != null) return ifaceMethod;
+                return findFieldByType(superClass, type, keyword);
             }
         } catch (Throwable ignored) {}
         return null;
     }
 
-    // Hook定位结果对象
-    private void hookLocationResult(Object locationResult) {
-        if (locationResult == null) return;
-
-        Class<?> resultClass = locationResult.getClass();
-        String className = resultClass.getName();
-
-        synchronized (hookedClasses) {
-            if (hookedClasses.contains(className)) {
-                return;
-            }
-            hookedClasses.add(className);
-        }
-
-        Log.e(TAG, "Hook定位结果类: " + className);
-
-        // Hook getLatitude
-        try {
-            XposedHelpers.findAndHookMethod(resultClass, "getLatitude",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                            if (!locationEnabled || appContext == null) return;
-                            try {
-                                double fakeLat = getFakeLatitude();
-                                param.setResult(fakeLat);
-                            } catch (Throwable t) {
-                                Log.e(TAG, "替换latitude失败", t);
-                            }
-                        }
-                    });
-            Log.e(TAG, "Hook getLatitude成功");
-        } catch (Throwable t) {
-            Log.e(TAG, "Hook getLatitude失败", t);
-        }
-
-        // Hook getLongitude
-        try {
-            XposedHelpers.findAndHookMethod(resultClass, "getLongitude",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                            if (!locationEnabled || appContext == null) return;
-                            try {
-                                double fakeLng = getFakeLongitude();
-                                param.setResult(fakeLng);
-                            } catch (Throwable t) {
-                                Log.e(TAG, "替换longitude失败", t);
-                            }
-                        }
-                    });
-            Log.e(TAG, "Hook getLongitude成功");
-        } catch (Throwable t) {
-            Log.e(TAG, "Hook getLongitude失败", t);
-        }
-    }
-
-    // 获取伪造的纬度
-    private double getFakeLatitude() {
-        try {
-            if (xcxEnabled) {
-                return xcxLat;
-            }
-            return Double.parseDouble(latitude);
-        } catch (Throwable t) {
-            return 39.908823;
-        }
-    }
-
-    // 获取伪造的经度
-    private double getFakeLongitude() {
-        try {
-            if (xcxEnabled) {
-                return xcxLng;
-            }
-            return Double.parseDouble(longitude);
-        } catch (Throwable t) {
-            return 116.397470;
-        }
-    }
-
     // ==========================================
-    // Hook 系统定位服务（备用方案）
+    // Hook 系统定位（备用方案）
     // ==========================================
     private void hookSystemLocation(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
             // Hook LocationManager.getLastKnownLocation
-            XposedHelpers.findAndHookMethod(
-                    android.location.LocationManager.class,
-                    "getLastKnownLocation",
-                    String.class,
+            XposedHelpers.findAndHookMethod("android.location.LocationManager",
+                    lpparam.classLoader, "getLastKnownLocation", String.class,
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                             if (!locationEnabled) return;
-                            try {
-                                android.location.Location original = (android.location.Location) param.getResult();
-                                if (original == null) {
-                                    // 创建一个新的Location
-                                    original = new android.location.Location("fake");
-                                    original.setTime(System.currentTimeMillis());
-                                }
-                                android.location.Location fake = new android.location.Location(original);
-                                fake.setLatitude(getFakeLatitude());
-                                fake.setLongitude(getFakeLongitude());
-                                param.setResult(fake);
-                            } catch (Throwable t) {
-                                Log.e(TAG, "替换系统定位失败", t);
+
+                            android.location.Location original = (android.location.Location) param.getResult();
+                            if (original == null) {
+                                // 创建一个新的Location
+                                original = new android.location.Location("fake");
                             }
+
+                            double lat = Double.parseDouble(latitude);
+                            double lng = Double.parseDouble(longitude);
+
+                            if (xcxEnabled && xcxLat != 0) {
+                                lat = xcxLat;
+                                lng = xcxLng;
+                            }
+
+                            original.setLatitude(lat);
+                            original.setLongitude(lng);
+                            param.setResult(original);
+                            Log.e(TAG, "系统定位getLastKnownLocation已Hook");
                         }
                     });
+
             Log.e(TAG, "系统定位Hook成功");
         } catch (Throwable t) {
-            Log.e(TAG, "系统定位Hook失败", t);
-        }
-
-        // Hook LocationListener.onLocationChanged
-        try {
-            XposedHelpers.findAndHookMethod(
-                    android.location.LocationListener.class,
-                    "onLocationChanged",
-                    android.location.Location.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            if (!locationEnabled) return;
-                            try {
-                                android.location.Location original = (android.location.Location) param.args[0];
-                                if (original != null) {
-                                    original.setLatitude(getFakeLatitude());
-                                    original.setLongitude(getFakeLongitude());
-                                }
-                            } catch (Throwable t) {
-                                Log.e(TAG, "替换LocationListener定位失败", t);
-                            }
-                        }
-                    });
-            Log.e(TAG, "LocationListener Hook成功");
-        } catch (Throwable t) {
-            Log.e(TAG, "LocationListener Hook失败", t);
+            Log.e(TAG, "Hook系统定位失败", t);
         }
     }
 
     // ==========================================
-    // 配置持久化
+    // 坐标转换
     // ==========================================
-    private void loadPrefs() {
-        if (appContext == null) return;
-        try {
-            SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-            locationEnabled = sh.getBoolean(KEY_LOCATION_ENABLED, false);
-            xcxEnabled = sh.getBoolean(KEY_XCX_ENABLED, false);
-            latitude = sh.getString(KEY_LATITUDE, "39.908823");
-            longitude = sh.getString(KEY_LONGITUDE, "116.397470");
-            gpsPlace = sh.getString(KEY_GPS_PLACE, "北京市东城区");
-            Log.e(TAG, "配置已加载: loc=" + locationEnabled + ", xcx=" + xcxEnabled);
-        } catch (Throwable t) {
-            Log.e(TAG, "加载配置失败", t);
-        }
-    }
-
-    private void savePrefs() {
-        if (appContext == null) return;
-        try {
-            SharedPreferences.Editor editor = appContext.getSharedPreferences(
-                    PREFS_NAME, Context.MODE_PRIVATE).edit();
-            editor.putBoolean(KEY_LOCATION_ENABLED, locationEnabled);
-            editor.putBoolean(KEY_XCX_ENABLED, xcxEnabled);
-            editor.putString(KEY_LATITUDE, latitude);
-            editor.putString(KEY_LONGITUDE, longitude);
-            editor.putString(KEY_GPS_PLACE, gpsPlace);
-            editor.apply();
-            Log.e(TAG, "配置已保存");
-        } catch (Throwable t) {
-            Log.e(TAG, "保存配置失败", t);
-        }
-    }
-
-    // 更新小程序坐标（GCJ02）
     private void updateXcxCoordinates() {
         try {
             double lat = Double.parseDouble(latitude);
             double lng = Double.parseDouble(longitude);
-            double[] result = CoordinateTransform.wgs84ToGcj02(lat, lng);
-            xcxLat = result[0];
-            xcxLng = result[1];
+            double[] gcj = CoordinateTransform.wgs84ToGcj02(lat, lng);
+            xcxLat = gcj[0];
+            xcxLng = gcj[1];
             Log.e(TAG, "小程序坐标已更新: " + xcxLat + ", " + xcxLng);
         } catch (Throwable t) {
             Log.e(TAG, "更新小程序坐标失败", t);
@@ -1034,96 +1332,62 @@ public class Hook implements IXposedHookLoadPackage {
     }
 
     // ==========================================
-    // UI 辅助方法
+    // 配置存取
     // ==========================================
-    private int dp2px(Context ctx, int dp) {
-        return (int) TypedValue.applyDimension(
-                TypedValue.COMPLEX_UNIT_DIP, dp,
-                ctx.getResources().getDisplayMetrics());
+    @SuppressLint("ApplySharedPref")
+    private void savePrefs() {
+        try {
+            if (appContext == null) return;
+            SharedPreferences sp = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            SharedPreferences.Editor editor = sp.edit();
+            editor.putBoolean(KEY_LOCATION_ENABLED, locationEnabled);
+            editor.putBoolean(KEY_XCX_ENABLED, xcxEnabled);
+            editor.putString(KEY_LATITUDE, latitude);
+            editor.putString(KEY_LONGITUDE, longitude);
+            editor.putString(KEY_GPS_PLACE, gpsPlace);
+            editor.commit();
+            Log.e(TAG, "配置已保存");
+        } catch (Throwable t) {
+            Log.e(TAG, "保存配置失败", t);
+        }
     }
 
-    private TextView createLabel(Context ctx, String text) {
-        TextView tv = new TextView(ctx);
-        tv.setText(text);
-        tv.setTextColor(0xFF555555);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        params.topMargin = dp2px(ctx, 10);
-        params.bottomMargin = dp2px(ctx, 4);
-        tv.setLayoutParams(params);
-        return tv;
-    }
-
-    private EditText createEditText(Context ctx, String text, String hint) {
-        EditText et = new EditText(ctx);
-        et.setText(text);
-        et.setHint(hint);
-        et.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-        et.setSingleLine(true);
-        et.setPadding(dp2px(ctx, 12), dp2px(ctx, 10),
-                dp2px(ctx, 12), dp2px(ctx, 10));
-        et.setBackgroundColor(0xFFF0F0F0);
-        et.setFilters(new InputFilter[]{new InputFilter.LengthFilter(100)});
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        params.bottomMargin = dp2px(ctx, 4);
-        et.setLayoutParams(params);
-        return et;
-    }
-
-    // 创建开关行
-    private LinearLayout createSwitchRow(Context ctx, String title,
-                                         boolean isChecked, CompoundButton.OnCheckedChangeListener listener) {
-        LinearLayout row = new LinearLayout(ctx);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp2px(ctx, 4), dp2px(ctx, 12), dp2px(ctx, 4), dp2px(ctx, 12));
-        row.setLayoutParams(new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-
-        TextView tv = new TextView(ctx);
-        tv.setText(title);
-        tv.setTextColor(0xFF333333);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-        tv.setLayoutParams(new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        row.addView(tv);
-
-        final TextView toggleTv = new TextView(ctx);
-        toggleTv.setText(isChecked ? "开启" : "关闭");
-        toggleTv.setTextColor(isChecked ? 0xFF27AE60 : 0xFFE74C3C);
-        toggleTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-        toggleTv.setGravity(Gravity.CENTER);
-        toggleTv.setPadding(dp2px(ctx, 16), dp2px(ctx, 6), dp2px(ctx, 16), dp2px(ctx, 6));
-        toggleTv.setBackgroundColor(0x10000000);
-        final boolean[] checked = {isChecked};
-        final CompoundButton.OnCheckedChangeListener finalListener = listener;
-        toggleTv.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                checked[0] = !checked[0];
-                toggleTv.setText(checked[0] ? "开启" : "关闭");
-                toggleTv.setTextColor(checked[0] ? 0xFF27AE60 : 0xFFE74C3C);
-                finalListener.onCheckedChanged(null, checked[0]);
-            }
-        });
-        row.addView(toggleTv);
-
-        return row;
+    private void loadPrefs() {
+        try {
+            if (appContext == null) return;
+            SharedPreferences sp = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            locationEnabled = sp.getBoolean(KEY_LOCATION_ENABLED, false);
+            xcxEnabled = sp.getBoolean(KEY_XCX_ENABLED, false);
+            latitude = sp.getString(KEY_LATITUDE, latitude);
+            longitude = sp.getString(KEY_LONGITUDE, longitude);
+            gpsPlace = sp.getString(KEY_GPS_PLACE, gpsPlace);
+            Log.e(TAG, "配置已加载, 定位开关: " + locationEnabled);
+        } catch (Throwable t) {
+            Log.e(TAG, "加载配置失败", t);
+        }
     }
 
     // ==========================================
-    // TextWatcher 简化类
+    // 工具方法
     // ==========================================
+    private int dp2px(Context context, float dp) {
+        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, dp,
+                context.getResources().getDisplayMetrics());
+    }
+
+    // 简易TextWatcher
     private static abstract class SimpleTextWatcher implements android.text.TextWatcher {
-        abstract void onTextChanged(String text);
-        @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
-        @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
+        @Override
+        public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+
+        @Override
+        public void onTextChanged(CharSequence s, int start, int before, int count) {
             onTextChanged(s.toString());
         }
-        @Override public void afterTextChanged(android.text.Editable s) {}
+
+        @Override
+        public void afterTextChanged(android.text.Editable s) {}
+
+        abstract void onTextChanged(String text);
     }
 }
