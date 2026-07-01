@@ -6,7 +6,9 @@ import android.app.Application;
 import android.app.Dialog;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.graphics.PixelFormat;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -15,6 +17,7 @@ import android.util.DisplayMetrics;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -33,9 +36,11 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.lang.reflect.Method;
+import java.util.List;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
@@ -60,6 +65,9 @@ public class Hook implements IXposedHookLoadPackage {
     private static View panelView;
     private static boolean isPanelShowing = false;
     private static int statusBarHeight = 0;
+    private static WindowManager windowManager;
+    private static WindowManager.LayoutParams floatWindowParams;
+    private static boolean isFloatWindowShowing = false;
 
     private static Context appContext;
     private static Handler uiHandler = new Handler(Looper.getMainLooper());
@@ -113,7 +121,15 @@ public class Hook implements IXposedHookLoadPackage {
             Log.e(TAG, "currentApplication 获取失败", t);
         }
 
-        // Hook LauncherUI 显示悬浮窗
+        // 方式一：Hook HomeUI$PlusActionView 构造函数（微信加号菜单 - 最可靠）
+        try {
+            hookWeChatPlusMenu(lpparam);
+            Log.e(TAG, "Hook 微信加号菜单成功");
+        } catch (Throwable t) {
+            Log.e(TAG, "Hook 微信加号菜单失败", t);
+        }
+
+        // 方式二：Hook LauncherUI 显示悬浮窗
         try {
             XposedHelpers.findAndHookMethod("com.tencent.mm.ui.LauncherUI",
                     lpparam.classLoader, "onCreate", Bundle.class, new XC_MethodHook() {
@@ -124,16 +140,24 @@ public class Hook implements IXposedHookLoadPackage {
                     uiHandler.postDelayed(() -> {
                         try {
                             hostActivity = activity;
-                            contentParent = (ViewGroup) activity.findViewById(android.R.id.content);
-                            if (floatView == null) {
-                                showFloatWindow(activity);
-                            }
+                            // 尝试使用WindowManager全局悬浮窗
+                            showGlobalFloatWindow(activity);
                         } catch (Throwable t) {
-                            Log.e(TAG, "显示悬浮窗失败", t);
+                            Log.e(TAG, "显示全局悬浮窗失败，尝试视图注入", t);
+                            // 降级到视图注入
+                            try {
+                                contentParent = (ViewGroup) activity.findViewById(android.R.id.content);
+                                if (floatView == null) {
+                                    showFloatWindow(activity);
+                                }
+                            } catch (Throwable t2) {
+                                Log.e(TAG, "视图注入也失败", t2);
+                            }
                         }
-                    }, 500);
+                    }, 1000);
                 }
             });
+            Log.e(TAG, "Hook LauncherUI 成功");
         } catch (Throwable t) {
             Log.e(TAG, "Hook LauncherUI 失败，尝试 Hook 任意 Activity", t);
             // 兜底 Hook Activity.onResume
@@ -149,21 +173,308 @@ public class Hook implements IXposedHookLoadPackage {
                         uiHandler.postDelayed(() -> {
                             try {
                                 hostActivity = activity;
-                                contentParent = (ViewGroup) activity.findViewById(android.R.id.content);
-                                if (floatView == null) {
-                                    showFloatWindow(activity);
-                                }
+                                showGlobalFloatWindow(activity);
                             } catch (Throwable t2) {
                                 Log.e(TAG, "兜底显示悬浮窗失败", t2);
+                                try {
+                                    contentParent = (ViewGroup) activity.findViewById(android.R.id.content);
+                                    if (floatView == null) {
+                                        showFloatWindow(activity);
+                                    }
+                                } catch (Throwable t3) {
+                                    Log.e(TAG, "视图注入兜底也失败", t3);
+                                }
                             }
-                        }, 500);
+                        }, 1000);
                     }
                 }
             });
         }
     }
 
-    // ======================== 悬浮窗UI ========================
+    // ======================== 微信加号菜单Hook ========================
+
+    private void hookWeChatPlusMenu(XC_LoadPackage.LoadPackageParam lpparam) {
+        // 尝试不同版本的类名
+        String[] possibleClassNames = {
+            "com.tencent.mm.ui.HomeUI$PlusActionView",
+            "com.tencent.mm.ui.HomeUI$b",
+            "com.tencent.mm.ui.home.HomeUI$PlusActionView",
+            "com.tencent.mm.ui.home.HomeUI$b"
+        };
+
+        Class<?> plusActionViewClass = null;
+        for (String className : possibleClassNames) {
+            try {
+                plusActionViewClass = XposedHelpers.findClassIfExists(className, lpparam.classLoader);
+                if (plusActionViewClass != null) {
+                    Log.e(TAG, "找到PlusActionView类: " + className);
+                    break;
+                }
+            } catch (Throwable t) {
+                Log.e(TAG, "尝试类失败: " + className, t);
+            }
+        }
+
+        if (plusActionViewClass == null) {
+            Log.e(TAG, "未找到PlusActionView类，跳过加号菜单Hook");
+            return;
+        }
+
+        // 查找getActionView方法
+        Method getActionViewMethod = null;
+        Method[] methods = plusActionViewClass.getDeclaredMethods();
+        for (Method m : methods) {
+            if (m.getReturnType() == View.class && m.getParameterTypes().length == 0) {
+                getActionViewMethod = m;
+                getActionViewMethod.setAccessible(true);
+                Log.e(TAG, "找到getActionView方法: " + m.getName());
+                break;
+            }
+        }
+
+        final Method finalGetActionViewMethod = getActionViewMethod;
+
+        // Hook所有构造函数
+        XposedBridge.hookAllConstructors(plusActionViewClass, new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                Log.e(TAG, "PlusActionView 构造函数被调用");
+
+                if (finalGetActionViewMethod != null) {
+                    try {
+                        View actionView = (View) finalGetActionViewMethod.invoke(param.thisObject);
+                        if (actionView != null) {
+                            // 设置点击监听器，点击打开设置面板
+                            actionView.setOnClickListener(v -> {
+                                Log.e(TAG, "PlusActionView 被点击");
+                                try {
+                                    Context context = v.getContext();
+                                    if (context instanceof Activity) {
+                                        hostActivity = (Activity) context;
+                                    }
+                                    showPanelDialog(v.getContext());
+                                } catch (Throwable t) {
+                                    Log.e(TAG, "显示设置面板失败", t);
+                                }
+                            });
+
+                            // 设置长按监听器（备用触发方式）
+                            actionView.setOnLongClickListener(v -> {
+                                Log.e(TAG, "PlusActionView 被长按");
+                                try {
+                                    Context context = v.getContext();
+                                    if (context instanceof Activity) {
+                                        hostActivity = (Activity) context;
+                                    }
+                                    showPanelDialog(v.getContext());
+                                    return true;
+                                } catch (Throwable t) {
+                                    Log.e(TAG, "长按显示设置面板失败", t);
+                                    return false;
+                                }
+                            });
+
+                            Log.e(TAG, "PlusActionView 监听器设置成功");
+                        }
+                    } catch (Throwable t) {
+                        Log.e(TAG, "获取ActionView失败", t);
+                    }
+                }
+            }
+        });
+    }
+
+    // ======================== 全局悬浮窗（WindowManager） ========================
+
+    @SuppressLint("ClickableViewAccessibility")
+    private void showGlobalFloatWindow(Context context) {
+        if (isFloatWindowShowing) return;
+
+        windowManager = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
+        if (windowManager == null) {
+            Log.e(TAG, "WindowManager 为 null");
+            return;
+        }
+
+        int resourceId = context.getResources().getIdentifier("status_bar_height", "dimen", "android");
+        if (resourceId > 0) {
+            statusBarHeight = context.getResources().getDimensionPixelSize(resourceId);
+        }
+
+        // 创建悬浮按钮
+        final LinearLayout floatBtn = new LinearLayout(context);
+        floatBtn.setOrientation(LinearLayout.HORIZONTAL);
+        floatBtn.setGravity(Gravity.CENTER);
+        floatBtn.setBackgroundColor(0xFF4A90E2);
+        floatBtn.setPadding(dp2px(context, 12), dp2px(context, 8), dp2px(context, 12), dp2px(context, 8));
+
+        TextView btnText = new TextView(context);
+        btnText.setText("定位");
+        btnText.setTextColor(0xFFFFFFFF);
+        btnText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        floatBtn.addView(btnText);
+
+        // 设置圆角背景
+        floatBtn.setBackgroundResource(android.R.drawable.dialog_holo_light_frame);
+        floatBtn.setBackgroundColor(0xFF4A90E2);
+
+        // 悬浮窗参数
+        floatWindowParams = new WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                getWindowType(),
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+        );
+        floatWindowParams.gravity = Gravity.TOP | Gravity.END;
+        floatWindowParams.x = dp2px(context, 16);
+        floatWindowParams.y = statusBarHeight + dp2px(context, 100);
+
+        // 拖拽逻辑
+        final int[] touchPosition = new int[2];
+        final int[] initialPosition = new int[2];
+        final boolean[] isDragging = {false};
+        final long[] downTime = {0};
+
+        floatBtn.setOnTouchListener((v, event) -> {
+            switch (event.getAction()) {
+                case MotionEvent.ACTION_DOWN:
+                    downTime[0] = System.currentTimeMillis();
+                    isDragging[0] = false;
+                    touchPosition[0] = (int) event.getRawX();
+                    touchPosition[1] = (int) event.getRawY();
+                    initialPosition[0] = floatWindowParams.x;
+                    initialPosition[1] = floatWindowParams.y;
+                    return true;
+                case MotionEvent.ACTION_MOVE:
+                    int dx = (int) event.getRawX() - touchPosition[0];
+                    int dy = (int) event.getRawY() - touchPosition[1];
+                    if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
+                        isDragging[0] = true;
+                        floatWindowParams.x = initialPosition[0] - dx;
+                        floatWindowParams.y = initialPosition[1] + dy;
+                        try {
+                            windowManager.updateViewLayout(floatBtn, floatWindowParams);
+                        } catch (Exception e) {
+                            Log.e(TAG, "更新悬浮窗位置失败", e);
+                        }
+                    }
+                    return true;
+                case MotionEvent.ACTION_UP:
+                    if (!isDragging[0] && System.currentTimeMillis() - downTime[0] < 300) {
+                        // 点击事件
+                        try {
+                            showPanelDialog(context);
+                        } catch (Throwable t) {
+                            Log.e(TAG, "显示面板失败", t);
+                        }
+                    }
+                    return true;
+            }
+            return false;
+        });
+
+        try {
+            windowManager.addView(floatBtn, floatWindowParams);
+            floatView = floatBtn;
+            isFloatWindowShowing = true;
+            Log.e(TAG, "全局悬浮窗显示成功");
+        } catch (Exception e) {
+            Log.e(TAG, "添加全局悬浮窗失败", e);
+            throw new RuntimeException(e);
+        }
+    }
+
+    private int getWindowType() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            return WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
+        } else {
+            return WindowManager.LayoutParams.TYPE_PHONE;
+        }
+    }
+
+    private int dp2px(Context context, int dp) {
+        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, dp, context.getResources().getDisplayMetrics());
+    }
+
+    // ======================== 对话框方式显示设置面板 ========================
+
+    private void showPanelDialog(Context context) {
+        final Dialog dialog = new Dialog(context, android.R.style.Theme_Translucent_NoTitleBar);
+
+        LinearLayout mainContainer = new LinearLayout(context);
+        mainContainer.setOrientation(LinearLayout.VERTICAL);
+        mainContainer.setBackgroundColor(0xF0FFFFFF);
+        mainContainer.setPadding(dp2px(context, 16), dp2px(context, 16), dp2px(context, 16), dp2px(context, 16));
+
+        // 标题栏
+        LinearLayout titleBar = new LinearLayout(context);
+        titleBar.setOrientation(LinearLayout.HORIZONTAL);
+        titleBar.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        titleBar.setLayoutParams(titleParams);
+
+        TextView titleText = new TextView(context);
+        titleText.setText("定位设置");
+        titleText.setTextColor(0xFF000000);
+        titleText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        titleText.setGravity(Gravity.CENTER);
+        titleText.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        titleBar.addView(titleText);
+
+        Button closeBtn = new Button(context);
+        closeBtn.setText("✕");
+        closeBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        closeBtn.setBackgroundColor(0x00000000);
+        closeBtn.setTextColor(0xFF666666);
+        closeBtn.setOnClickListener(v -> dialog.dismiss());
+        titleBar.addView(closeBtn);
+        mainContainer.addView(titleBar);
+
+        // 滚动内容
+        ScrollView contentScroll = new ScrollView(context);
+        contentScroll.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        LinearLayout contentLayout = new LinearLayout(context);
+        contentLayout.setOrientation(LinearLayout.VERTICAL);
+        contentScroll.addView(contentLayout);
+
+        // 定位模块
+        addLocationContent(context, contentLayout);
+
+        mainContainer.addView(contentScroll);
+
+        // 保存按钮
+        Button saveBtn = new Button(context);
+        saveBtn.setText("💾 保存设置");
+        saveBtn.setBackgroundColor(0xFF4CAF50);
+        saveBtn.setTextColor(0xFFFFFFFF);
+        saveBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        saveBtn.setPadding(0, dp2px(context, 12), 0, dp2px(context, 12));
+        LinearLayout.LayoutParams saveParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        saveParams.topMargin = dp2px(context, 12);
+        saveBtn.setLayoutParams(saveParams);
+        saveBtn.setOnClickListener(v -> {
+            savePrefs();
+            Toast.makeText(context, "设置已保存", Toast.LENGTH_SHORT).show();
+            dialog.dismiss();
+        });
+        mainContainer.addView(saveBtn);
+
+        dialog.setContentView(mainContainer);
+        dialog.getWindow().setGravity(Gravity.CENTER);
+        dialog.getWindow().setLayout(
+                (int) (context.getResources().getDisplayMetrics().widthPixels * 0.9),
+                (int) (context.getResources().getDisplayMetrics().heightPixels * 0.8)
+        );
+        dialog.show();
+    }
+
+    // ======================== 悬浮窗UI（视图注入方式 - 备用） ========================
 
     @SuppressLint("ClickableViewAccessibility")
     private void showFloatWindow(Activity activity) {
