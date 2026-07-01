@@ -52,6 +52,13 @@
             android:name="lsposedscope"
             android:value="com.tencent.mm" />
 
+        <!-- 配置共享Provider -->
+        <provider
+            android:name=".ConfigProvider"
+            android:authorities="com.HookTest.provider"
+            android:exported="true"
+            android:grantUriPermissions="true" />
+
     </application>
 
 </manifest>
