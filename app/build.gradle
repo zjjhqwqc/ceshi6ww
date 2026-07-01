@@ -32,5 +32,7 @@ android {
 }
 
 dependencies {
-    compileOnly project(':xposed-api')
+    // 使用官方Xposed API（compileOnly，不会打包进APK）
+    compileOnly 'de.robv.android.xposed:api:82'
+    compileOnly 'de.robv.android.xposed:api:82:sources'
 }

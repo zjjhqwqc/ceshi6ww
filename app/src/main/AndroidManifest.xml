@@ -19,8 +19,21 @@
     <application
         android:allowBackup="true"
         android:label="@string/app_name"
-        android:supportsRtl="true">
+        android:supportsRtl="true"
+        android:icon="@android:drawable/ic_menu_mylocation">
 
+        <!-- 主界面Activity（LSPosed模块检测需要） -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Xposed模块标识 -->
         <meta-data
             android:name="xposedmodule"
             android:value="true" />
@@ -32,6 +45,11 @@
             android:value="82" />
         <meta-data
             android:name="xposedscope"
+            android:value="com.tencent.mm" />
+
+        <!-- LSPosed 作用域配置 -->
+        <meta-data
+            android:name="lsposedscope"
             android:value="com.tencent.mm" />
 
     </application>
