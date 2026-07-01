@@ -235,8 +235,8 @@ public class Hook implements IXposedHookLoadPackage {
 
         final Method finalGetActionViewMethod = getActionViewMethod;
 
-        // Hook所有构造函数
-        XposedBridge.hookAllConstructors(plusActionViewClass, new XC_MethodHook() {
+        // Hook构造函数 - 尝试常见的几种参数组合
+        XC_MethodHook constructorHook = new XC_MethodHook() {
             @Override
             protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                 Log.e(TAG, "PlusActionView 构造函数被调用");
@@ -282,7 +282,33 @@ public class Hook implements IXposedHookLoadPackage {
                     }
                 }
             }
-        });
+        };
+
+        // 尝试不同的构造函数签名
+        String className = plusActionViewClass.getName();
+        try {
+            // 无参构造函数
+            XposedHelpers.findAndHookConstructor(className, lpparam.classLoader, constructorHook);
+            Log.e(TAG, "Hook无参构造函数成功");
+        } catch (Throwable t) {
+            Log.e(TAG, "Hook无参构造函数失败，尝试有参", t);
+            try {
+                // Context参数构造函数
+                XposedHelpers.findAndHookConstructor(className, lpparam.classLoader,
+                        Context.class, constructorHook);
+                Log.e(TAG, "Hook Context构造函数成功");
+            } catch (Throwable t2) {
+                Log.e(TAG, "Hook Context构造函数失败", t2);
+                try {
+                    // View参数构造函数
+                    XposedHelpers.findAndHookConstructor(className, lpparam.classLoader,
+                            View.class, constructorHook);
+                    Log.e(TAG, "Hook View构造函数成功");
+                } catch (Throwable t3) {
+                    Log.e(TAG, "Hook View构造函数失败", t3);
+                }
+            }
+        }
     }
 
     // ======================== 全局悬浮窗（WindowManager） ========================
