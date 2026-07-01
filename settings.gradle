@@ -3,19 +3,7 @@ pluginManagement {
         gradlePluginPortal()
         google()
         mavenCentral()
-        maven { url 'https://api.xposed.info/' }
     }
 }
-
-dependencyResolutionManagement {
-    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
-    repositories {
-        google()
-        mavenCentral()
-        maven { url 'https://api.xposed.info/' }
-        maven { url 'https://jitpack.io' }
-    }
-}
-
 rootProject.name = "HookTest"
-include ':app'
+include ':app', ':xposed-api'
