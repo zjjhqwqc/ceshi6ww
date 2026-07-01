@@ -22,10 +22,13 @@
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="Hook Test Module" />
+            android:value="微信定位插件" />
         <meta-data
             android:name="xposedminversion"
             android:value="82" />
+        <meta-data
+            android:name="xposedscope"
+            android:value="com.tencent.mm" />
 
     </application>
 

@@ -66,7 +66,7 @@ public class Hook implements IXposedHookLoadPackage {
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
-        if (!lpparam.packageName.equals("com.alibaba.android.rimet")) {
+        if (!lpparam.packageName.equals("com.tencent.mm")) {
             return;
         }
 
@@ -113,29 +113,14 @@ public class Hook implements IXposedHookLoadPackage {
             Log.e(TAG, "currentApplication 获取失败", t);
         }
 
-        // Hook HomeActivityV2 获取实例
+        // Hook LauncherUI 显示悬浮窗
         try {
-            XposedHelpers.findAndHookMethod("com.alibaba.android.rimet.biz.HomeActivityV2",
-                    lpparam.classLoader, "onCreate", Bundle.class, new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                    hostActivity = (Activity) param.thisObject;
-                    Log.e(TAG, "HomeActivityV2 onCreate");
-                }
-            });
-            Log.e(TAG, "HomeActivityV2 Hook成功");
-        } catch (Throwable t) {
-            Log.e(TAG, "Hook HomeActivityV2 失败", t);
-        }
-
-        // Hook LaunchHomeActivity 显示悬浮窗
-        try {
-            XposedHelpers.findAndHookMethod("com.alibaba.android.rimet.biz.LaunchHomeActivity",
+            XposedHelpers.findAndHookMethod("com.tencent.mm.ui.LauncherUI",
                     lpparam.classLoader, "onCreate", Bundle.class, new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                     final Activity activity = (Activity) param.thisObject;
-                    Log.e(TAG, "LaunchHomeActivity onCreate");
+                    Log.e(TAG, "LauncherUI onCreate");
                     uiHandler.postDelayed(() -> {
                         try {
                             hostActivity = activity;
@@ -150,7 +135,7 @@ public class Hook implements IXposedHookLoadPackage {
                 }
             });
         } catch (Throwable t) {
-            Log.e(TAG, "Hook LaunchHomeActivity 失败，尝试 Hook 任意 Activity", t);
+            Log.e(TAG, "Hook LauncherUI 失败，尝试 Hook 任意 Activity", t);
             // 兜底 Hook Activity.onResume
             XposedHelpers.findAndHookMethod(Activity.class, "onResume", new XC_MethodHook() {
                 private boolean shown = false;
@@ -158,7 +143,7 @@ public class Hook implements IXposedHookLoadPackage {
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                     if (shown) return;
                     Activity activity = (Activity) param.thisObject;
-                    if (activity.getClass().getName().contains("alibaba")) {
+                    if (activity.getClass().getName().contains("tencent.mm")) {
                         shown = true;
                         Log.e(TAG, "Activity onResume 兜底显示悬浮窗: " + activity.getClass().getName());
                         uiHandler.postDelayed(() -> {
