@@ -31,7 +31,7 @@ import javax.crypto.spec.SecretKeySpec;
 
 /**
  * 网络验证核心类
- * 基于ShuanQ SDK实现方式：AES加密 + MD5签名 + Hex编码
+ * 完全按照ShuanQ SDK实现：AES加密 + MD5签名 + Hex编码 + 响应签名验证 + 请求安全码验证 + 时差验证
  * 验证通过后所有hook才能正常运行
  */
 public class ShuanQVerifier {
@@ -39,13 +39,9 @@ public class ShuanQVerifier {
     private static final String TAG = "ShuanQVerifier";
 
     // ========== 验证服务配置 ==========
-    // 验证服务器地址
     private static final String HOST = "http://arm.luckyyh.top";
-    // 应用ID
     private static final String APP_ID = "1";
-    // 应用密钥
     private static final String APP_KEY = "6e59e6715aa80d71a1cfbbca1be7072f";
-    // AES加密密钥
     private static final String AES_KEY = "55decc546d77795b";
     // ============================================================
 
@@ -60,11 +56,19 @@ public class ShuanQVerifier {
     private static final String KEY_EXPIRE_TIME = "expire_time";
     private static final String KEY_LAST_VERIFY = "last_verify_time";
 
+    // 签名时间限制（秒）- 与原SDK一致，最小90秒，最大90秒
+    private static final int SIGNATURE_TIME_LIMIT_MIN = 90;
+    private static final int SIGNATURE_TIME_LIMIT_MAX = 90;
+
+    // 心跳频率（毫秒）- 与原SDK一致
+    private static final int HEARTBEAT_FREQUENCY = 50000;
+
     // 验证状态
     private static boolean isVerified = false;
     private static String cardCode = "";
     private static long expireTime = 0;
     private static long lastVerifyTime = 0;
+    private static String userToken = "";
 
     // 验证回调接口
     public interface VerifyCallback {
@@ -72,16 +76,13 @@ public class ShuanQVerifier {
         void onFailure(String errorMsg);
     }
 
-    // 心跳相关（与原SDK一致：Timer + TimerTask，间隔50000ms）
-    private static final int HEARTBEAT_FREQUENCY = 50000; // 心跳频率，50000毫秒=50秒，与原SDK一致
+    // 心跳相关
     private static Timer heartbeatTimer = null;
     private static TimerTask heartbeatTimerTask = null;
     private static boolean heartbeatRunning = false;
-    private static String userToken = ""; // 用户token，登录成功后获取
 
     /**
      * 初始化验证系统
-     * 自动加载保存的卡密并执行自动验证
      */
     public static void init(Context context) {
         loadVerifyState(context);
@@ -123,13 +124,11 @@ public class ShuanQVerifier {
             return;
         }
 
-        // 使用Timer + TimerTask，与原SDK实现方式一致
         final Handler handler = new Handler(Looper.getMainLooper());
         heartbeatTimer = new Timer();
         heartbeatTimerTask = new TimerTask() {
             @Override
             public void run() {
-                // 在主线程执行
                 handler.post(new Runnable() {
                     @Override
                     public void run() {
@@ -142,10 +141,9 @@ public class ShuanQVerifier {
             }
         };
 
-        // 立即执行第一次，之后每50秒执行一次（与原SDK一致）
         heartbeatTimer.schedule(heartbeatTimerTask, 0, HEARTBEAT_FREQUENCY);
         heartbeatRunning = true;
-        Log.d(TAG, "心跳检测已启动，间隔: " + HEARTBEAT_FREQUENCY + "ms (" + (HEARTBEAT_FREQUENCY / 1000) + "秒)");
+        Log.d(TAG, "心跳检测已启动，间隔: " + HEARTBEAT_FREQUENCY + "ms");
     }
 
     /**
@@ -168,7 +166,6 @@ public class ShuanQVerifier {
      * 检查是否已验证通过
      */
     public static boolean isVerified() {
-        // 如果已过期，返回false
         if (isVerified && expireTime > 0 && System.currentTimeMillis() > expireTime) {
             isVerified = false;
             Log.d(TAG, "验证已过期");
@@ -196,7 +193,7 @@ public class ShuanQVerifier {
     }
 
     /**
-     * 执行卡密验证
+     * 执行卡密验证（完全按照原SDK实现）
      */
     public static void verifyCard(final Context context, final String card, final VerifyCallback callback) {
         final Handler handler = new Handler(Looper.getMainLooper());
@@ -205,10 +202,14 @@ public class ShuanQVerifier {
             @Override
             public void run() {
                 try {
+                    // 生成32位随机安全码（与原SDK一致）
+                    final String requestSafeCode = getRandomString(32);
+
                     // 构建请求参数
                     HashMap<String, String> params = new HashMap<>();
                     params.put("card", card);
                     params.put("machine_code", getDeviceId(context));
+                    params.put("request_safe_code", requestSafeCode);
 
                     // 加密参数并发送请求
                     HashMap<String, String> encryptedParams = encryptParams(params);
@@ -218,61 +219,64 @@ public class ShuanQVerifier {
 
                     // 解析响应
                     JSONObject jsonResponse = new JSONObject(response);
-                    int code = jsonResponse.optInt("code", -1);
-                    String msg = jsonResponse.optString("message", jsonResponse.optString("msg", "未知错误"));
+                    String codeStr = jsonResponse.optString("code", "-1");
+                    String message = jsonResponse.optString("message", "未知错误");
 
-                    if (code == 1) {
-                        // 验证成功 - 解密data字段
+                    if ("1".equals(codeStr)) {
+                        // 验证成功
                         String encryptedData = jsonResponse.optString("data", "");
-                        String expire = "";
+                        String timestampStr = jsonResponse.optString("timestamp", "");
+                        String signature = jsonResponse.optString("signature", "");
 
-                        if (!encryptedData.isEmpty()) {
-                            try {
-                                // 解密data字段（Hex -> AES解密）
-                                byte[] dataBytes = hexStringToBytes(encryptedData);
-                                String decryptedData = decryptAES(dataBytes, AES_KEY);
-                                Log.d(TAG, "解密后的data: " + decryptedData);
-
-                                JSONObject dataObj = new JSONObject(decryptedData);
-                                if (dataObj.has("cardInfo")) {
-                                    JSONObject cardInfo = dataObj.getJSONObject("cardInfo");
-                                    expire = cardInfo.optString("expire_time", "");
-                                    // 获取endtime用于计算到期时间
-                                    long endTime = cardInfo.optLong("endtime", 0);
-                                    if (endTime > 0) {
-                                        expireTime = endTime * 1000L;
-                                    }
-                                    // 获取token
-                                    String token = cardInfo.optString("token", "");
-                                    if (!token.isEmpty()) {
-                                        userToken = token;
-                                    }
-                                } else {
-                                    // 没有cardInfo但code=1也算验证通过
-                                    Log.d(TAG, "解密后的data中没有cardInfo字段，数据: " + decryptedData);
-                                }
-                            } catch (Exception e) {
-                                Log.e(TAG, "解密响应data失败", e);
-                                // 解密失败但code=1，仍视为验证通过
-                            }
+                        // 1. 响应签名验证（与原SDK一致：data + timestamp + appkey）
+                        if (!responseDataSignatureVerification(encryptedData, timestampStr, signature)) {
+                            throw new Exception("响应数据验签失败");
                         }
 
-                        // 如果没有从响应中获取到到期时间，使用默认24小时
-                        if (expireTime == 0) {
-                            expireTime = System.currentTimeMillis() + 24 * 60 * 60 * 1000L;
+                        // 2. 解密data
+                        String decryptedData = dataDecrypt(encryptedData);
+                        if (decryptedData == null) {
+                            throw new Exception("响应数据解密失败");
+                        }
+                        Log.d(TAG, "解密后的data: " + decryptedData);
+
+                        JSONObject dataObj = new JSONObject(decryptedData);
+                        JSONObject cardInfo = dataObj.getJSONObject("cardInfo");
+                        JSONObject surplusTime = dataObj.getJSONObject("surplusTime");
+                        JSONObject moreOtherData = dataObj.getJSONObject("moreOtherData");
+                        String expireTimeStr = dataObj.optString("expireTimeStr", "");
+
+                        // 3. 请求安全码验证（与原SDK一致）
+                        String responseSafeCode = moreOtherData.optString("request_safe_code", "");
+                        if (!responseSafeCode.equals(requestSafeCode)) {
+                            throw new Exception("请求安全码校验失败，检测到数据被截获篡改");
+                        }
+
+                        // 4. 时差验证（与原SDK一致）
+                        long currentTimeSec = new Date().getTime() / 1000L;
+                        long responseTimestamp = Long.parseLong(timestampStr);
+                        if (currentTimeSec > responseTimestamp + SIGNATURE_TIME_LIMIT_MAX
+                                || currentTimeSec < responseTimestamp - SIGNATURE_TIME_LIMIT_MIN) {
+                            throw new Exception("时差验证失败");
+                        }
+
+                        // 提取卡密信息
+                        userToken = cardInfo.optString("token", "");
+                        long endTime = cardInfo.optLong("endtime", 0);
+                        if (endTime > 0) {
+                            expireTime = endTime * 1000L;
                         }
 
                         // 保存验证状态
                         isVerified = true;
                         cardCode = card;
                         lastVerifyTime = System.currentTimeMillis();
-
                         saveVerifyState(context);
 
-                        // 验证成功后启动心跳检测
+                        // 启动心跳
                         startHeartbeat(context);
 
-                        final String info = "卡密: " + card + "\n到期时间: " + (expire.isEmpty() ? "24小时" : expire);
+                        final String info = "卡密: " + card + "\n到期时间: " + expireTimeStr;
                         handler.post(new Runnable() {
                             @Override
                             public void run() {
@@ -280,7 +284,7 @@ public class ShuanQVerifier {
                             }
                         });
                     } else {
-                        throw new Exception(msg);
+                        throw new Exception(message);
                     }
                 } catch (final Exception e) {
                     Log.e(TAG, "验证失败", e);
@@ -297,9 +301,7 @@ public class ShuanQVerifier {
     }
 
     /**
-     * 心跳验证（与原SDK一致）
-     * 调用 /api/card_app/get_card_info 接口
-     * 参数包含：card, machine_code, update_active, user_token, request_safe_code
+     * 心跳验证（与原SDK完全一致）
      */
     public static void heartbeatVerify(final Context context) {
         if (cardCode == null || cardCode.isEmpty()) {
@@ -312,10 +314,10 @@ public class ShuanQVerifier {
             @Override
             public void run() {
                 try {
-                    // 生成随机安全码（与原SDK一致：32位随机字符串）
-                    String requestSafeCode = getRandomString(32);
+                    // 生成32位随机安全码
+                    final String requestSafeCode = getRandomString(32);
 
-                    // 构建心跳请求参数（与原SDK一致）
+                    // 构建心跳请求参数
                     HashMap<String, String> params = new HashMap<>();
                     params.put("card", cardCode);
                     params.put("machine_code", getDeviceId(context));
@@ -331,53 +333,94 @@ public class ShuanQVerifier {
 
                     // 解析响应
                     JSONObject jsonResponse = new JSONObject(response);
-                    int code = jsonResponse.optInt("code", -1);
-                    String msg = jsonResponse.optString("message", jsonResponse.optString("msg", "未知错误"));
+                    String codeStr = jsonResponse.optString("code", "-1");
+                    String message = jsonResponse.optString("message", "未知错误");
 
-                    if (code == 1) {
-                        // 心跳成功
+                    // 心跳验证中 code == "1" 或 "10000" 都算成功（与原SDK一致）
+                    if ("1".equals(codeStr) || "10000".equals(codeStr)) {
+                        String encryptedData = jsonResponse.optString("data", "");
+                        String timestampStr = jsonResponse.optString("timestamp", "");
+                        String signature = jsonResponse.optString("signature", "");
+
+                        // 1. 响应签名验证
+                        if (!responseDataSignatureVerification(encryptedData, timestampStr, signature)) {
+                            // 签名验证失败，卡密失效（与原SDK一致）
+                            isVerified = false;
+                            stopHeartbeat();
+                            saveVerifyState(context);
+                            Log.d(TAG, "心跳响应验签失败，卡密失效");
+                            return;
+                        }
+
+                        // 2. 解密data
+                        String decryptedData = dataDecrypt(encryptedData);
+                        if (decryptedData == null) {
+                            // 解密失败，卡密失效
+                            isVerified = false;
+                            stopHeartbeat();
+                            saveVerifyState(context);
+                            Log.d(TAG, "心跳响应解密失败，卡密失效");
+                            return;
+                        }
+                        Log.d(TAG, "心跳解密后的data: " + decryptedData);
+
+                        JSONObject dataObj = new JSONObject(decryptedData);
+                        JSONObject cardInfo = dataObj.getJSONObject("cardInfo");
+                        JSONObject surplusTime = dataObj.getJSONObject("surplusTime");
+                        JSONObject moreOtherData = dataObj.getJSONObject("moreOtherData");
+                        String expireTimeStr = dataObj.optString("expireTimeStr", "");
+
+                        // 3. 请求安全码验证
+                        String responseSafeCode = moreOtherData.optString("request_safe_code", "");
+                        if (!responseSafeCode.equals(requestSafeCode)) {
+                            isVerified = false;
+                            stopHeartbeat();
+                            saveVerifyState(context);
+                            Log.d(TAG, "心跳请求安全码校验失败，卡密失效");
+                            return;
+                        }
+
+                        // 4. 时差验证
+                        long currentTimeSec = new Date().getTime() / 1000L;
+                        long responseTimestamp = Long.parseLong(timestampStr);
+                        if (currentTimeSec > responseTimestamp + SIGNATURE_TIME_LIMIT_MAX
+                                || currentTimeSec < responseTimestamp - SIGNATURE_TIME_LIMIT_MIN) {
+                            isVerified = false;
+                            stopHeartbeat();
+                            saveVerifyState(context);
+                            Log.d(TAG, "心跳时差验证失败，卡密失效");
+                            return;
+                        }
+
+                        // 提取卡密信息
+                        userToken = cardInfo.optString("token", "");
+                        long endTime = cardInfo.optLong("endtime", 0);
+                        if (endTime > 0) {
+                            expireTime = endTime * 1000L;
+                        }
+
+                        // 检查是否已过期
+                        if (currentTimeSec > endTime && endTime > 0) {
+                            isVerified = false;
+                            stopHeartbeat();
+                            saveVerifyState(context);
+                            Log.d(TAG, "卡密已到期");
+                            return;
+                        }
+
                         lastVerifyTime = System.currentTimeMillis();
                         saveVerifyState(context);
                         Log.d(TAG, "心跳验证成功");
-
-                        // 解析卡密信息，更新到期时间 - 解密data字段
-                        try {
-                            String encryptedData = jsonResponse.optString("data", "");
-                            if (!encryptedData.isEmpty()) {
-                                byte[] dataBytes = hexStringToBytes(encryptedData);
-                                String decryptedData = decryptAES(dataBytes, AES_KEY);
-                                Log.d(TAG, "心跳解密后的data: " + decryptedData);
-
-                                JSONObject dataObj = new JSONObject(decryptedData);
-                                if (dataObj.has("cardInfo")) {
-                                    JSONObject cardInfo = dataObj.getJSONObject("cardInfo");
-                                    long endTime = cardInfo.optLong("endtime", 0);
-                                    if (endTime > 0) {
-                                        // 转换为毫秒
-                                        expireTime = endTime * 1000L;
-                                        saveVerifyState(context);
-                                        Log.d(TAG, "心跳更新到期时间: " + expireTime);
-                                    }
-                                    // 更新token
-                                    String token = cardInfo.optString("token", "");
-                                    if (!token.isEmpty()) {
-                                        userToken = token;
-                                    }
-                                }
-                            }
-                        } catch (Exception e) {
-                            Log.e(TAG, "解析心跳卡密信息失败", e);
-                        }
                     } else {
                         // 心跳失败，卡密失效
                         isVerified = false;
                         stopHeartbeat();
                         saveVerifyState(context);
-                        Log.d(TAG, "心跳验证失败，卡密已失效: " + msg);
+                        Log.d(TAG, "心跳验证失败，卡密已失效: " + message);
                     }
                 } catch (Exception e) {
                     Log.e(TAG, "心跳验证异常", e);
-                    // 网络异常时不立即失效，保留缓存状态（与原SDK一致，异常时不杀进程）
+                    // 网络异常时不立即失效（与原SDK一致，异常时不杀进程）
                 }
             }
         }).start();
@@ -387,9 +430,7 @@ public class ShuanQVerifier {
      * 清除验证状态
      */
     public static void clearVerify(Context context) {
-        // 停止心跳
         stopHeartbeat();
-
         isVerified = false;
         cardCode = "";
         expireTime = 0;
@@ -444,17 +485,19 @@ public class ShuanQVerifier {
     }
 
     // ==========================================
-    // 加密与签名工具方法（与ShuanQ SDK一致）
+    // 加密与签名工具方法（与ShuanQ SDK完全一致）
     // ==========================================
 
     /**
-     * 加密请求参数（AES加密 + Hex编码 + MD5签名）
+     * 加密请求参数（与原SDK的ParamsUtil.paramHandle完全一致）
      */
     private static HashMap<String, String> encryptParams(HashMap<String, String> params) {
         HashMap<String, String> result = new HashMap<>();
 
         // 添加appid
-        params.put("appid", APP_ID);
+        if (params.get("appid") == null || params.get("appid").equals("")) {
+            params.put("appid", APP_ID);
+        }
 
         // 添加时间戳
         params.put("timestamp", String.valueOf(new Date().getTime() / 1000L));
@@ -463,20 +506,21 @@ public class ShuanQVerifier {
         String signature = getSignMd5(params, APP_KEY);
         params.put("signature", signature);
 
-        // AES加密参数名和参数值 + Hex编码
+        // AES加密参数名和参数值 + Hex编码（appid除外，与原SDK一致）
         for (String key : params.keySet()) {
             String value = params.get(key);
             String encryptedKey = key;
             String encryptedValue = value;
 
-            if (!key.equals("appid") && value != null && !value.isEmpty()) {
+            if (!"appid".equals(key) && value != null && !value.isEmpty()) {
                 try {
-                    // 加密参数名
-                    encryptedKey = toHexString(encryptAES(key, AES_KEY));
-                    // 加密参数值
-                    encryptedValue = toHexString(encryptAES(value, AES_KEY));
+                    // 加密参数名（与原SDK paramNameTransferEncryption=true一致）
+                    encryptedKey = getApiDataTransferEncryptionEncoded(encryptAES(key, AES_KEY));
+                    // 加密参数值（与原SDK paramValueTransferEncryption=true一致）
+                    encryptedValue = getApiDataTransferEncryptionEncoded(encryptAES(value, AES_KEY));
                 } catch (Exception e) {
                     Log.e(TAG, "参数加密失败: " + key, e);
+                    throw new RuntimeException(e.getMessage());
                 }
             }
 
@@ -487,10 +531,47 @@ public class ShuanQVerifier {
     }
 
     /**
-     * MD5签名（与ShuanQ SDK一致）
-     * 规则：按参数名升序排列，拼接key=value&，最后追加appKey，然后MD5
+     * 响应签名验证（与原SDK一致：data + timestamp + appkey）
+     */
+    private static boolean responseDataSignatureVerification(String data, String timestamp, String signature) {
+        String signStr = data + timestamp + APP_KEY;
+        String calcSign = md5(signStr);
+        if (calcSign == null) return false;
+        return calcSign.equalsIgnoreCase(signature);
+    }
+
+    /**
+     * 数据解密（与原SDK dataDecrypt一致：Hex解码 + AES解密）
+     */
+    private static String dataDecrypt(String encryptedData) {
+        try {
+            byte[] dataBytes = hexStringToBytes(encryptedData);
+            return decryptAES(dataBytes, AES_KEY);
+        } catch (Exception e) {
+            Log.e(TAG, "数据解密失败", e);
+            return null;
+        }
+    }
+
+    /**
+     * 获取数据传输编码后的字符串（Hex编码，与原SDK一致）
+     */
+    private static String getApiDataTransferEncryptionEncoded(byte[] data) {
+        return toHexString(data);
+    }
+
+    /**
+     * MD5签名（与ShuanQ SDK SignUtil.getSignMd5完全一致）
      */
     private static String getSignMd5(Map<String, String> map, String appKey) {
+        String signStr = getSignString(map) + appKey;
+        return md5(signStr);
+    }
+
+    /**
+     * 获取签名字符串（与原SDK SignUtil.getSignString完全一致）
+     */
+    private static String getSignString(Map<String, String> map) {
         StringBuilder sb = new StringBuilder();
         ArrayList<Map.Entry<String, String>> list = new ArrayList<>(map.entrySet());
 
@@ -502,33 +583,47 @@ public class ShuanQVerifier {
             }
         });
 
-        // 拼接参数（排除signature和appid）
+        // 拼接参数（排除空值、signature、appid，与原SDK一致）
         for (Map.Entry<String, String> entry : list) {
             String key = entry.getKey();
             String value = entry.getValue();
-            if (value == null || value.isEmpty() || "signature".equals(key) || "appid".equals(key)) {
+            if (value == null || value.equals("") || "signature".equals(key) || "appid".equals(key)) {
                 continue;
             }
             sb.append(key).append("=").append(value).append("&");
         }
 
-        // 去掉末尾的&
-        String signStr = sb.toString();
-        if (signStr.endsWith("&")) {
-            signStr = signStr.substring(0, signStr.length() - 1);
-        }
-
-        // 追加appKey
-        signStr += appKey;
-
-        // MD5
-        return md5(signStr);
+        // 去掉首尾的&（与原SDK trimFirstAndLastChar一致）
+        return trimFirstAndLastChar(sb.toString(), '&');
     }
 
     /**
-     * AES加密（ECB模式，PKCS5Padding）
+     * 去掉首尾的指定字符（与原SDK SignUtil.trimFirstAndLastChar完全一致）
+     */
+    private static String trimFirstAndLastChar(String str, char c) {
+        String result = str;
+        while (true) {
+            int firstIdx = result.indexOf(c);
+            int start = firstIdx == 0 ? 1 : 0;
+            int lastIdx = result.lastIndexOf(c) + 1;
+            int end = lastIdx == result.length() ? result.lastIndexOf(c) : result.length();
+            result = result.substring(start, end);
+            boolean needTrimStart = result.indexOf(c) == 0;
+            boolean needTrimEnd = result.lastIndexOf(c) + 1 == result.length();
+            if (!needTrimStart && !needTrimEnd) {
+                break;
+            }
+        }
+        return result;
+    }
+
+    /**
+     * AES加密（ECB模式，PKCS5Padding，与原SDK AesUtil.encrypt完全一致）
      */
     private static byte[] encryptAES(String data, String key) throws Exception {
+        if (key == null) {
+            return null;
+        }
         String keyStr = key;
         if (key.length() != 16) {
             keyStr = key.substring(0, 16);
@@ -540,7 +635,7 @@ public class ShuanQVerifier {
     }
 
     /**
-     * AES解密
+     * AES解密（与原SDK AesUtil.decrypt完全一致）
      */
     private static String decryptAES(byte[] data, String key) throws Exception {
         String keyStr = key;
@@ -554,52 +649,66 @@ public class ShuanQVerifier {
     }
 
     /**
-     * 字节数组转Hex字符串
+     * 字节数组转Hex字符串（与原SDK HexUtil.toHexString完全一致，大写）
      */
     private static String toHexString(byte[] bytes) {
-        StringBuilder sb = new StringBuilder();
-        for (byte b : bytes) {
-            sb.append(String.format("%02X", b));
+        char[] hexChars = "0123456789ABCDEF".toCharArray();
+        StringBuilder sb = new StringBuilder("");
+        for (int i = 0; i < bytes.length; i++) {
+            byte b = bytes[i];
+            sb.append(hexChars[(b & 0xF0) >> 4]);
+            b = bytes[i];
+            sb.append(hexChars[b & 0xF]);
         }
-        return sb.toString();
+        return sb.toString().trim();
     }
 
     /**
-     * Hex字符串转字节数组
+     * Hex字符串转字节数组（与原SDK HexUtil.hexStringToBytes完全一致，小写）
      */
     private static byte[] hexStringToBytes(String hex) {
-        int len = hex.length() / 2;
-        byte[] result = new byte[len];
-        for (int i = 0; i < len; i++) {
-            int index = i * 2;
-            result[i] = (byte) Integer.parseInt(hex.substring(index, index + 2), 16);
+        String hexLower = hex.toLowerCase();
+        char[] hexChars = hexLower.toCharArray();
+        byte[] result = new byte[hexLower.length() / 2];
+        return hexStringToBytes(hexChars, result);
+    }
+
+    private static byte[] hexStringToBytes(char[] cArray, byte[] byArray) {
+        for (int i = 0; i < byArray.length; i++) {
+            int n = i * 2;
+            int n2 = "0123456789abcdef".indexOf(cArray[n]);
+            byArray[i] = (byte) (n2 * 16 + "0123456789abcdef".indexOf(cArray[n + 1]) & 0xFF);
         }
-        return result;
+        return byArray;
     }
 
     /**
-     * 生成随机字符串（与原SDK一致）
+     * 生成随机字符串（与原SDK ShuanQUtil.getRandomString完全一致）
      */
     public static String getRandomString(int length) {
-        String chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
         Random random = new Random();
-        StringBuilder sb = new StringBuilder();
+        StringBuffer sb = new StringBuffer();
+        String chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
         for (int i = 0; i < length; i++) {
-            int index = random.nextInt(chars.length());
-            sb.append(chars.charAt(index));
+            int n = random.nextInt(62);
+            char c = chars.charAt(n);
+            sb.append(c);
         }
-        return sb.toString();
+        return String.valueOf(sb);
     }
 
     /**
-     * MD5加密
+     * MD5加密（与原SDK Md5Util.getMD5完全一致，小写）
      */
     private static String md5(String data) {
+        if (data == null) {
+            return null;
+        }
         try {
             MessageDigest md = MessageDigest.getInstance("MD5");
             md.update(data.getBytes("UTF-8"));
             byte[] digest = md.digest();
-            StringBuilder sb = new StringBuilder();
+            StringBuffer sb = new StringBuffer();
             for (byte b : digest) {
                 String hex = Integer.toHexString(b & 0xFF);
                 if (hex.length() == 1) {
@@ -621,8 +730,8 @@ public class ShuanQVerifier {
         URL url = new URL(urlStr);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setRequestMethod("POST");
-        conn.setConnectTimeout(10000);
-        conn.setReadTimeout(10000);
+        conn.setConnectTimeout(15000);
+        conn.setReadTimeout(15000);
         conn.setDoOutput(true);
         conn.setDoInput(true);
 
