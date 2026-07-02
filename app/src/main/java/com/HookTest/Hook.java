@@ -71,9 +71,16 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     // 是否已执行过hook（和原APK一致，用静态变量确保只执行一次）
     private static boolean hasHooked = false;
 
+    // hook初始化是否已完成（所有hook都已注册）
+    private static boolean hooksInitialized = false;
+
     // ========== 网络验证状态 ==========
     private static boolean hasVerified = false;  // 是否已执行过验证检查
     private static boolean verifyPassed = false; // 验证是否通过
+
+    // 重试计数
+    private static int retryCount = 0;
+    private static final int MAX_RETRY = 5;
 
     // Zygote初始化（和原APK一致）
     @Override
@@ -91,6 +98,7 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             XposedBridge.log("[WxLocationHook] 【模块加载】handleLoadPackage 被调用!");
             XposedBridge.log("[WxLocationHook] 包名: " + lpparam.packageName);
             XposedBridge.log("[WxLocationHook] 进程名: " + lpparam.processName);
+            XposedBridge.log("[WxLocationHook] classLoader: " + lpparam.classLoader);
             XposedBridge.log("[WxLocationHook] =========================================");
 
             // 同时输出到logcat
@@ -113,6 +121,13 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             if (hasHooked) {
                 XposedBridge.log("[WxLocationHook] Application is already hook ! !");
                 Log.e(TAG, "Application is already hook ! !");
+
+                // 如果已经hook过但初始化未完成（可能是注入太晚的情况），尝试直接初始化
+                if (!hooksInitialized && appContext != null) {
+                    XposedBridge.log("[WxLocationHook] 检测到已hook但未初始化，尝试直接初始化...");
+                    Log.e(TAG, "已hook但未初始化，尝试直接初始化");
+                    initializeHooks();
+                }
                 return;
             }
 
@@ -121,40 +136,41 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             XposedBridge.log("[WxLocationHook] load wechat Package success !");
             Log.e(TAG, "load wechat Package success !");
 
-            // Hook Application.attach 获取Context（和原APK完全一致）
+            // 【关键修复】双保险机制：
+            // 1. 先保存classLoader，用于hook类
+            // 2. Hook Application.attach 作为主要入口（注入早时生效）
+            // 3. 同时尝试直接获取Application Context，如果已存在则直接初始化（注入晚时生效）
+
+            classLoader = lpparam.classLoader;
+
+            // 方式一：Hook Application.attach（标准方式，注入时机早时生效）
             XposedHelpers.findAndHookMethod(Application.class, "attach", Context.class,
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                             try {
                                 XposedBridge.log("[WxLocationHook] Application.attach 已触发!");
-                                Log.e(TAG, "Application is already hook ! !");
+                                Log.e(TAG, "Application.attach 已触发!");
+
+                                if (hooksInitialized) {
+                                    XposedBridge.log("[WxLocationHook] hooks已经初始化过，跳过");
+                                    Log.e(TAG, "hooks已经初始化过，跳过");
+                                    return;
+                                }
+
                                 appContext = (Context) param.args[0];
                                 // 从Context获取classLoader（和原APK一致：context.getClassLoader()）
-                                classLoader = appContext.getClassLoader();
+                                if (classLoader == null) {
+                                    classLoader = appContext.getClassLoader();
+                                }
+
                                 XposedBridge.log("[WxLocationHook] 获取到Context: " + appContext.getPackageName());
                                 Log.e(TAG, "获取到Context: " + appContext.getPackageName());
 
-                                // ========== 网络验证检查 ==========
-                                // 深度集成：验证未通过时所有hook都失效
-                                checkNetworkVerify();
+                                // 执行所有hook初始化
+                                initializeHooks();
 
-                                // 加载配置
-                                loadConfig();
-
-                                // 注册配置变化观察者，实现实时生效
-                                registerConfigObserver();
-
-                                // 显示加载完成提示
-                                showLoadedToast();
-
-                                // 开始Hook腾讯地图定位
-                                startTencentMapHook();
-
-                                // 开始Hook菜单
-                                startMenuHook();
-
-                                XposedBridge.log("[WxLocationHook] ========== 所有Hook注册完成 ==========");
+                                XposedBridge.log("[WxLocationHook] ========== 所有Hook注册完成(Application.attach方式) ==========");
                             } catch (Throwable t) {
                                 XposedBridge.log("[WxLocationHook] Application.attach 回调异常: " + t.getMessage());
                                 Log.e(TAG, "Application.attach 回调异常", t);
@@ -162,11 +178,105 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                         }
                     });
 
-            XposedBridge.log("[WxLocationHook] ========== 模块加载初始化完成 ==========");
-            Log.e(TAG, "========== 模块加载初始化完成 ==========");
+            // 方式二：尝试直接获取Application（注入时机晚时生效）
+            // 很多时候LSPosed注入太晚，Application.attach已经执行过了
+            // 这时候需要直接从lpparam中获取信息并初始化
+            try {
+                // 尝试通过反射获取当前Application
+                Object activityThread = XposedHelpers.callStaticMethod(
+                        XposedHelpers.findClass("android.app.ActivityThread", null),
+                        "currentActivityThread");
+                if (activityThread != null) {
+                    Application app = (Application) XposedHelpers.callMethod(activityThread, "getApplication");
+                    if (app != null) {
+                        appContext = app;
+                        if (classLoader == null) {
+                            classLoader = app.getClassLoader();
+                        }
+
+                        XposedBridge.log("[WxLocationHook] 通过ActivityThread直接获取到Application: " + app.getPackageName());
+                        Log.e(TAG, "通过ActivityThread直接获取到Application: " + app.getPackageName());
+
+                        // 延迟一点执行初始化，确保Application完全就绪
+                        new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (!hooksInitialized) {
+                                    XposedBridge.log("[WxLocationHook] 使用直接获取方式初始化hooks...");
+                                    Log.e(TAG, "使用直接获取方式初始化hooks...");
+                                    initializeHooks();
+                                }
+                            }
+                        }, 500);
+                    }
+                }
+            } catch (Throwable t) {
+                XposedBridge.log("[WxLocationHook] 直接获取Application失败，将依赖Application.attach方式: " + t.getMessage());
+                Log.e(TAG, "直接获取Application失败，将依赖Application.attach方式", t);
+            }
+
+            XposedBridge.log("[WxLocationHook] ========== 模块加载初始化完成（双保险模式） ==========");
+            Log.e(TAG, "========== 模块加载初始化完成（双保险模式） ==========");
         } catch (Throwable t) {
             XposedBridge.log("[WxLocationHook] handleLoadPackage 异常: " + t.getMessage());
             Log.e(TAG, "handleLoadPackage 异常", t);
+        }
+    }
+
+    /**
+     * 初始化所有hook
+     * 统一入口，确保无论通过哪种方式获取Context，都执行相同的初始化逻辑
+     */
+    private void initializeHooks() {
+        if (hooksInitialized) {
+            return;
+        }
+
+        try {
+            XposedBridge.log("[WxLocationHook] 开始初始化所有hooks...");
+            Log.e(TAG, "开始初始化所有hooks...");
+
+            // ========== 网络验证检查 ==========
+            // 深度集成：验证未通过时所有hook都失效
+            checkNetworkVerify();
+
+            // 加载配置
+            loadConfig();
+
+            // 注册配置变化观察者，实现实时生效
+            registerConfigObserver();
+
+            // 显示加载完成提示
+            showLoadedToast();
+
+            // 开始Hook腾讯地图定位
+            startTencentMapHook();
+
+            // 开始Hook菜单
+            startMenuHook();
+
+            hooksInitialized = true;
+
+            XposedBridge.log("[WxLocationHook] ========== 所有Hook初始化完成 ==========");
+            Log.e(TAG, "========== 所有Hook初始化完成 ==========");
+
+        } catch (Throwable t) {
+            XposedBridge.log("[WxLocationHook] hooks初始化异常: " + t.getMessage());
+            Log.e(TAG, "hooks初始化异常", t);
+
+            // 失败重试机制
+            if (retryCount < MAX_RETRY) {
+                retryCount++;
+                XposedBridge.log("[WxLocationHook] hooks初始化失败，第 " + retryCount + " 次重试...");
+                Log.e(TAG, "hooks初始化失败，第 " + retryCount + " 次重试...");
+
+                new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        initializeHooks();
+                    }
+                }, 1000 * retryCount); // 递增延迟重试
+            }
         }
     }
 
@@ -178,7 +288,8 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             XposedBridge.log("[WxLocationHook] 【验证】开始检查网络验证状态...");
             Log.e(TAG, "【验证】开始检查网络验证状态...");
 
-            // 通过ContentProvider读取验证状态（跨进程通信）
+            // 优先通过ContentProvider读取验证状态（跨进程通信）
+            boolean providerSuccess = false;
             try {
                 ConfigProvider.ConfigData data = ConfigProvider.readConfig(appContext);
                 if (data != null) {
@@ -199,11 +310,48 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                             // 时间格式不对，忽略
                         }
                     }
+
+                    // 如果ContentProvider读取到了验证状态，且已验证，就信任它
+                    if (verifyPassed) {
+                        providerSuccess = true;
+                    }
                 }
             } catch (Throwable t) {
                 XposedBridge.log("[WxLocationHook] 【验证】ContentProvider读取失败: " + t.getMessage());
                 Log.e(TAG, "【验证】ContentProvider读取失败", t);
-                verifyPassed = false;
+            }
+
+            // ContentProvider读取失败时，尝试直接读取模块的SharedPreferences
+            // 注意：这只在sharedUserId相同或者模块进程已启动并暴露数据时可能有效
+            if (!providerSuccess) {
+                try {
+                    // 尝试通过创建模块Context来读取SharedPreferences
+                    Context moduleContext = appContext.createPackageContext(
+                            "Square.box", Context.CONTEXT_IGNORE_SECURITY);
+                    if (moduleContext != null) {
+                        android.content.SharedPreferences sp = moduleContext.getSharedPreferences(
+                                "shuanq_verify", Context.MODE_PRIVATE);
+                        boolean savedVerified = sp.getBoolean("is_verified", false);
+                        String savedCard = sp.getString("card_code", "");
+                        long savedExpire = sp.getLong("expire_time", 0);
+
+                        XposedBridge.log("[WxLocationHook] 【验证】从模块SP读取: verified=" + savedVerified + ", card=" + savedCard);
+                        Log.e(TAG, "【验证】从模块SP读取: verified=" + savedVerified);
+
+                        if (savedVerified) {
+                            if (savedExpire > 0 && System.currentTimeMillis() > savedExpire) {
+                                verifyPassed = false;
+                                XposedBridge.log("[WxLocationHook] 【验证】SP中的验证已过期");
+                            } else {
+                                verifyPassed = true;
+                                XposedBridge.log("[WxLocationHook] 【验证】使用SP缓存的验证状态");
+                            }
+                        }
+                    }
+                } catch (Throwable t) {
+                    XposedBridge.log("[WxLocationHook] 【验证】读取模块SP失败: " + t.getMessage());
+                    Log.e(TAG, "【验证】读取模块SP失败", t);
+                }
             }
 
             hasVerified = true;
@@ -216,6 +364,24 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             } else {
                 XposedBridge.log("[WxLocationHook] 【验证】验证通过，Hook功能正常运行");
                 Log.e(TAG, "【验证】验证通过，Hook功能正常运行");
+
+                // 验证通过后，尝试触发一次心跳验证（在后台线程）
+                try {
+                    new Thread(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                // 尝试通过ContentProvider触发心跳（通过写入配置触发模块端的心跳）
+                                // 这里简化处理：验证状态已经通过，主要依赖模块端的心跳
+                                XposedBridge.log("[WxLocationHook] 【验证】验证通过，等待模块端心跳维护");
+                            } catch (Throwable t) {
+                                Log.e(TAG, "【验证】心跳触发失败", t);
+                            }
+                        }
+                    }).start();
+                } catch (Throwable t) {
+                    Log.e(TAG, "【验证】启动心跳线程失败", t);
+                }
             }
 
         } catch (Throwable t) {
@@ -323,18 +489,51 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     // ==========================================
     // Hook 腾讯地图定位（完全按照原APK方式实现）
     // ==========================================
+    // 腾讯地图hook状态
+    private static boolean tencentMapHooked = false;
+    private static int tencentMapRetryCount = 0;
+    private static final int MAX_TENCENT_MAP_RETRY = 10;
+
     private void startTencentMapHook() {
         XposedBridge.log("[WxLocationHook] 【TencentMap】start TencentMap...");
         Log.e(TAG, "start TencentMap...");
+
+        // 如果已经hook成功，直接返回
+        if (tencentMapHooked) {
+            XposedBridge.log("[WxLocationHook] 【TencentMap】已经hook过，跳过");
+            Log.e(TAG, "【TencentMap】已经hook过，跳过");
+            return;
+        }
 
         try {
             // 原APK使用的类名：com.tencent.map.geolocation.sapp.TencentLocationManager
             String tencentClassName = "com.tencent.map.geolocation.sapp.TencentLocationManager";
 
-            // 用classLoader加载类（和原APK一致）
-            Class<?> tencentLocationClass = classLoader.loadClass(tencentClassName);
-            XposedBridge.log("[WxLocationHook] 【TencentMap】(locationClass): " + tencentClassName);
-            Log.e(TAG, "(locationClass): " + tencentClassName);
+            // 尝试加载类
+            Class<?> tencentLocationClass = null;
+            try {
+                tencentLocationClass = classLoader.loadClass(tencentClassName);
+                XposedBridge.log("[WxLocationHook] 【TencentMap】(locationClass): " + tencentClassName);
+                Log.e(TAG, "(locationClass): " + tencentClassName);
+            } catch (ClassNotFoundException e) {
+                // 类还没加载，延迟重试
+                if (tencentMapRetryCount < MAX_TENCENT_MAP_RETRY) {
+                    tencentMapRetryCount++;
+                    XposedBridge.log("[WxLocationHook] 【TencentMap】类未加载，第 " + tencentMapRetryCount + " 次延迟重试...");
+                    Log.e(TAG, "【TencentMap】类未加载，第 " + tencentMapRetryCount + " 次延迟重试");
+
+                    getUiHandler().postDelayed(new Runnable() {
+                        @Override
+                        public void run() {
+                            startTencentMapHook();
+                        }
+                    }, 2000 * tencentMapRetryCount); // 递增延迟
+                } else {
+                    XposedBridge.log("[WxLocationHook] 【TencentMap】重试次数已达上限，放弃hook腾讯地图");
+                    Log.e(TAG, "【TencentMap】重试次数已达上限，放弃hook腾讯地图");
+                }
+                return;
+            }
 
             // Hook requestSingleFreshLocation - 用hookAllMethods（和原APK一致）
             try {
@@ -399,6 +598,11 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
             XposedBridge.log("[WxLocationHook] 【TencentMap】start TencentMap... 完成");
             Log.e(TAG, "start TencentMap... 完成");
+
+            // 标记腾讯地图hook成功
+            tencentMapHooked = true;
+            XposedBridge.log("[WxLocationHook] 【TencentMap】腾讯地图Hook全部注册完成");
+            Log.e(TAG, "腾讯地图Hook全部注册完成");
         } catch (Throwable t) {
             XposedBridge.log("[WxLocationHook] 【TencentMap】TencentMap ClassNotFound --> " + t.getMessage());
             Log.e(TAG, "TencentMap ClassNotFound -->");

@@ -71,6 +71,14 @@ public class MainActivity extends Activity {
         setContentView(createMainView());
     }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // 每次回到界面都刷新验证状态显示
+        isVerified = ShuanQVerifier.isVerified();
+        updateVerifyStatusText();
+    }
+
     @SuppressLint("SetTextI18n")
     private View createMainView() {
         LinearLayout mainLayout = new LinearLayout(this);

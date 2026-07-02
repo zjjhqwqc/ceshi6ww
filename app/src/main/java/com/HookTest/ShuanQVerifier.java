@@ -35,15 +35,15 @@ public class ShuanQVerifier {
 
     private static final String TAG = "ShuanQVerifier";
 
-    // ========== 验证服务配置（需要根据实际验证后台修改） ==========
+    // ========== 验证服务配置 ==========
     // 验证服务器地址
-    private static final String HOST = "http://demo.shuanq.cn";
+    private static final String HOST = "http://arm.luckyyh.top";
     // 应用ID
     private static final String APP_ID = "1";
     // 应用密钥
-    private static final String APP_KEY = "ec559db68538fefc3838452ab443d772";
+    private static final String APP_KEY = "6e59e6715aa80d71a1cfbbca1be7072f";
     // AES加密密钥
-    private static final String AES_KEY = "36e902d23b6e08891e025d58d836847a";
+    private static final String AES_KEY = "55decc546d77795b";
     // ============================================================
 
     // API接口
@@ -69,12 +69,81 @@ public class ShuanQVerifier {
         void onFailure(String errorMsg);
     }
 
+    // 心跳相关
+    private static final long HEARTBEAT_INTERVAL = 30 * 60 * 1000L; // 30分钟心跳一次
+    private static Handler heartbeatHandler = null;
+    private static Runnable heartbeatRunnable = null;
+    private static boolean heartbeatRunning = false;
+
     /**
      * 初始化验证系统
+     * 自动加载保存的卡密并执行自动验证
      */
     public static void init(Context context) {
         loadVerifyState(context);
-        Log.d(TAG, "验证系统初始化完成，当前验证状态: " + isVerified);
+        Log.d(TAG, "验证系统初始化完成，当前验证状态: " + isVerified + ", 卡密: " + cardCode);
+
+        // 自动登录：如果有保存的卡密且未验证，则自动验证
+        if (cardCode != null && !cardCode.isEmpty() && !isVerified) {
+            Log.d(TAG, "检测到保存的卡密，执行自动验证...");
+            verifyCard(context, cardCode, new VerifyCallback() {
+                @Override
+                public void onSuccess(String cardInfo) {
+                    Log.d(TAG, "自动验证成功: " + cardInfo);
+                }
+
+                @Override
+                public void onFailure(String errorMsg) {
+                    Log.d(TAG, "自动验证失败: " + errorMsg);
+                }
+            });
+        }
+
+        // 启动心跳检测
+        startHeartbeat(context);
+    }
+
+    /**
+     * 启动心跳检测
+     */
+    public static void startHeartbeat(final Context context) {
+        if (heartbeatRunning) {
+            Log.d(TAG, "心跳已在运行中");
+            return;
+        }
+
+        if (heartbeatHandler == null) {
+            heartbeatHandler = new Handler(Looper.getMainLooper());
+        }
+
+        if (heartbeatRunnable == null) {
+            heartbeatRunnable = new Runnable() {
+                @Override
+                public void run() {
+                    if (isVerified && cardCode != null && !cardCode.isEmpty()) {
+                        Log.d(TAG, "执行心跳验证...");
+                        heartbeatVerify(context);
+                    }
+                    // 安排下一次心跳
+                    heartbeatHandler.postDelayed(this, HEARTBEAT_INTERVAL);
+                }
+            };
+        }
+
+        heartbeatHandler.postDelayed(heartbeatRunnable, HEARTBEAT_INTERVAL);
+        heartbeatRunning = true;
+        Log.d(TAG, "心跳检测已启动，间隔: " + (HEARTBEAT_INTERVAL / 60000) + "分钟");
+    }
+
+    /**
+     * 停止心跳检测
+     */
+    public static void stopHeartbeat() {
+        if (heartbeatHandler != null && heartbeatRunnable != null) {
+            heartbeatHandler.removeCallbacks(heartbeatRunnable);
+        }
+        heartbeatRunning = false;
+        Log.d(TAG, "心跳检测已停止");
     }
 
     /**
