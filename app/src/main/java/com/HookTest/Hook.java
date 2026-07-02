@@ -198,362 +198,258 @@ public class Hook implements IXposedHookLoadPackage {
     }
 
     // ==========================================
-    // Hook 腾讯地图定位
+    // Hook 腾讯地图定位（完全按照原APK方式实现）
     // ==========================================
     private void startTencentMapHook() {
-        XposedBridge.log("[WxLocationHook] start TencentMap...");
+        XposedBridge.log("[WxLocationHook] 【TencentMap】start TencentMap...");
         Log.e(TAG, "start TencentMap...");
 
         try {
             // 原APK使用的类名：com.tencent.map.geolocation.sapp.TencentLocationManager
-            String[] tencentClasses = {
-                    "com.tencent.map.geolocation.sapp.TencentLocationManager",
-                    "com.tencent.map.geolocation.TencentLocationManager",
-                    "com.tencent.location.TencentLocationManager"
-            };
+            String tencentClassName = "com.tencent.map.geolocation.sapp.TencentLocationManager";
 
+            // 直接用classLoader加载类（和原APK一致）
             Class<?> tencentLocationClass = null;
-            for (String className : tencentClasses) {
-                try {
-                    tencentLocationClass = XposedHelpers.findClass(className, classLoader);
-                    XposedBridge.log("[WxLocationHook] 找到定位类: " + className);
-                    Log.e(TAG, "(locationClass): " + className);
-                    break;
-                } catch (Throwable t) {
-                    // 继续尝试
-                }
-            }
-
-            if (tencentLocationClass == null) {
-                XposedBridge.log("[WxLocationHook] TencentMap ClassNotFound --> 启用系统定位Hook");
+            try {
+                tencentLocationClass = classLoader.loadClass(tencentClassName);
+                XposedBridge.log("[WxLocationHook] (locationClass): " + tencentClassName);
+                Log.e(TAG, "(locationClass): " + tencentClassName);
+            } catch (Throwable t) {
+                XposedBridge.log("[WxLocationHook] TencentMap ClassNotFound --> " + t.getMessage());
                 Log.e(TAG, "TencentMap ClassNotFound -->");
                 // 备用：Hook系统定位
                 hookSystemLocation();
                 return;
             }
 
-            // Hook requestSingleFreshLocation 方法
+            // Hook requestSingleFreshLocation - 用hookAllMethods（和原APK一致）
             try {
-                Method[] methods = tencentLocationClass.getDeclaredMethods();
-                for (final Method method : methods) {
-                    String name = method.getName();
+                XposedBridge.hookAllMethods(tencentLocationClass, "requestSingleFreshLocation",
+                        new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                XposedBridge.log("[WxLocationHook] 【TencentMap】requestSingleFreshLocation 被调用");
+                                Log.e(TAG, "requestSingleFreshLocation 被调用");
+                                if (!isLocation) return;
 
-                    // Hook requestSingleFreshLocation
-                    if ("requestSingleFreshLocation".equals(name)) {
-                        try {
-                            XposedBridge.hookMethod(method, new XC_MethodHook() {
-                                @Override
-                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                    Log.e(TAG, "requestSingleFreshLocation 被调用");
-                                    if (!isLocation) return;
-
-                                    // 查找listener参数并Hook
-                                    for (Object arg : param.args) {
-                                        if (arg != null && isLocationListener(arg)) {
-                                            hookTencentLocationListener(arg);
-                                        }
+                                // 原APK的方式：从args[1]开始找listener（args[0]可能是其他参数）
+                                if (param.args != null && param.args.length >= 2) {
+                                    Object listener = param.args[1];
+                                    if (listener != null) {
+                                        hookLocationListener(listener);
                                     }
                                 }
-                            });
-                            Log.e(TAG, "Hook requestSingleFreshLocation 成功");
-                        } catch (Throwable t) {
-                            Log.e(TAG, "Hook requestSingleFreshLocation 失败", t);
-                        }
-                    }
-
-                    // Hook requestLocationUpdates
-                    if ("requestLocationUpdates".equals(name)) {
-                        try {
-                            XposedBridge.hookMethod(method, new XC_MethodHook() {
-                                @Override
-                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                    Log.e(TAG, "requestLocationUpdates 被调用");
-                                    if (!isLocation) return;
-
-                                    for (Object arg : param.args) {
-                                        if (arg != null && isLocationListener(arg)) {
-                                            hookTencentLocationListener(arg);
-                                        }
-                                    }
-                                }
-                            });
-                            Log.e(TAG, "Hook requestLocationUpdates 成功");
-                        } catch (Throwable t) {
-                            Log.e(TAG, "Hook requestLocationUpdates 失败", t);
-                        }
-                    }
-                }
-
-                // 同时用hookAllMethods兜底
-                try {
-                    XposedBridge.hookAllMethods(tencentLocationClass, "requestSingleFreshLocation",
-                            new XC_MethodHook() {
-                                @Override
-                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                    Log.e(TAG, "[hookAll] requestSingleFreshLocation 被调用");
-                                    if (!isLocation) return;
-                                    for (Object arg : param.args) {
-                                        if (arg != null && isLocationListener(arg)) {
-                                            hookTencentLocationListener(arg);
-                                        }
-                                    }
-                                }
-                            });
-                    Log.e(TAG, "hookAllMethods requestSingleFreshLocation 成功");
-                } catch (Throwable t) {
-                    Log.e(TAG, "hookAllMethods requestSingleFreshLocation 失败", t);
-                }
-
-                try {
-                    XposedBridge.hookAllMethods(tencentLocationClass, "requestLocationUpdates",
-                            new XC_MethodHook() {
-                                @Override
-                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                    Log.e(TAG, "[hookAll] requestLocationUpdates 被调用");
-                                    if (!isLocation) return;
-                                    for (Object arg : param.args) {
-                                        if (arg != null && isLocationListener(arg)) {
-                                            hookTencentLocationListener(arg);
-                                        }
-                                    }
-                                }
-                            });
-                    Log.e(TAG, "hookAllMethods requestLocationUpdates 成功");
-                } catch (Throwable t) {
-                    Log.e(TAG, "hookAllMethods requestLocationUpdates 失败", t);
-                }
-
+                            }
+                        });
+                XposedBridge.log("[WxLocationHook] 【TencentMap】Hook requestSingleFreshLocation 成功");
+                Log.e(TAG, "Hook requestSingleFreshLocation 成功");
             } catch (Throwable t) {
-                Log.e(TAG, "Hook腾讯定位方法失败", t);
+                XposedBridge.log("[WxLocationHook] Hook requestSingleFreshLocation 失败: " + t.getMessage());
+                Log.e(TAG, "Hook requestSingleFreshLocation 失败", t);
             }
 
-            // Hook腾讯定位对象的getLastKnownLocation等方法
+            // Hook requestLocationUpdates - 用hookAllMethods（和原APK一致）
             try {
-                hookTencentLocationObject(tencentLocationClass);
+                XposedBridge.hookAllMethods(tencentLocationClass, "requestLocationUpdates",
+                        new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                XposedBridge.log("[WxLocationHook] 【TencentMap】requestLocationUpdates 被调用");
+                                Log.e(TAG, "requestLocationUpdates 被调用");
+                                if (!isLocation) return;
+
+                                if (param.args != null && param.args.length >= 2) {
+                                    Object listener = param.args[1];
+                                    if (listener != null) {
+                                        hookLocationListener(listener);
+                                    }
+                                }
+                            }
+                        });
+                XposedBridge.log("[WxLocationHook] 【TencentMap】Hook requestLocationUpdates 成功");
+                Log.e(TAG, "Hook requestLocationUpdates 成功");
             } catch (Throwable t) {
-                Log.e(TAG, "Hook腾讯定位对象失败", t);
+                XposedBridge.log("[WxLocationHook] Hook requestLocationUpdates 失败: " + t.getMessage());
+                Log.e(TAG, "Hook requestLocationUpdates 失败", t);
             }
 
+            XposedBridge.log("[WxLocationHook] 【TencentMap】start TencentMap... 完成");
             Log.e(TAG, "start TencentMap... 完成");
         } catch (Throwable t) {
-            Log.e(TAG, "TencentMap ClassNotFound -->", t);
+            XposedBridge.log("[WxLocationHook] TencentMap Hook异常: " + t.getMessage());
+            Log.e(TAG, "TencentMap Hook异常", t);
             hookSystemLocation();
         }
     }
 
-    // 判断是否是定位监听器
-    private boolean isLocationListener(Object obj) {
-        if (obj == null) return false;
-        Class<?> clazz = obj.getClass();
-        String name = clazz.getName();
-
-        if (name.contains("TencentLocationListener")
-                || name.contains("LocationListener")
-                || name.contains("LocationCallback")
-                || name.contains("listener")
-                || name.contains("callback")) {
-            return true;
-        }
-
-        // 检查接口
-        Class<?>[] interfaces = clazz.getInterfaces();
-        for (Class<?> iface : interfaces) {
-            String ifaceName = iface.getName();
-            if (ifaceName.contains("TencentLocationListener")
-                    || ifaceName.contains("LocationListener")) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    // Hook腾讯定位监听器
-    private void hookTencentLocationListener(final Object listener) {
+    // ==========================================
+    // Hook定位监听器（和原APK一致的方式）
+    // ==========================================
+    private void hookLocationListener(final Object listener) {
         if (listener == null) return;
 
-        String className = listener.getClass().getName();
-        if (hookedClasses.contains(className)) {
+        final Class<?> listenerClass = listener.getClass();
+        final String className = listenerClass.getName();
+
+        // 检查是否已经hook过这个类
+        if (isClassHooked(className)) {
+            XposedBridge.log("[WxLocationHook] (mapClass): " + className + " is already hook !");
+            Log.e(TAG, "(mapClass): " + className + " is already hook !");
             return;
         }
-        hookedClasses.add(className);
+
+        // 标记为已hook
+        markClassHooked(className);
+
+        XposedBridge.log("[WxLocationHook] (mapClass): " + className + " hook 成功了！！");
+        Log.e(TAG, "(mapClass): " + className + " hook 成功了！！");
 
         try {
-            Method[] methods = listener.getClass().getDeclaredMethods();
-            boolean found = false;
+            // 用 findMethodBestMatch 找 onLocationChanged 方法（和原APK一致）
+            // 参数: int, String, Location 类型
+            Class<?>[] paramTypes = new Class<?>[]{
+                    int.class,
+                    String.class,
+                    null  // 第三个参数是Location类型，用null表示模糊匹配
+            };
 
-            for (final Method method : methods) {
-                String name = method.getName();
+            Method onLocationChangedMethod = XposedHelpers.findMethodBestMatch(
+                    listenerClass, "onLocationChanged", (Object[]) paramTypes);
 
-                // 查找onLocationChanged方法
-                if (name.contains("onLocationChanged")
-                        || name.contains("onLocation")
-                        || name.contains("locationChanged")) {
-
-                    // 检查是否有Location参数
-                    Class<?>[] params = method.getParameterTypes();
-                    boolean hasLocationParam = false;
-                    for (Class<?> p : params) {
-                        if (p.getName().contains("Location")
-                                || p.getName().contains("location")) {
-                            hasLocationParam = true;
-                            break;
-                        }
-                    }
-
-                    if (hasLocationParam || params.length >= 1) {
-                        try {
-                            XposedBridge.hookMethod(method, new XC_MethodHook() {
-                                @Override
-                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                    Log.e(TAG, "onLocationChanged 被调用: " + method.getName());
-                                    if (!isLocation) return;
-
-                                    // 修改第一个位置参数
-                                    for (int i = 0; i < param.args.length; i++) {
-                                        if (param.args[i] != null
-                                                && param.args[i].getClass().getName().contains("Location")) {
-                                            fakeTencentLocation(param.args[i]);
-                                            Log.e(TAG, "修改位置参数 " + i);
-                                            break;
-                                        }
-                                    }
-                                }
-                            });
-                            found = true;
-                            Log.e(TAG, "Hook onLocationChanged 成功: " + className + "." + name);
-                        } catch (Throwable t) {
-                            Log.e(TAG, "Hook onLocationChanged 失败: " + name, t);
-                        }
-                    }
-                }
-            }
-
-            if (!found) {
-                Log.e(TAG, "onLocationChanged Method not exit ! - " + className);
-            }
-        } catch (Throwable t) {
-            Log.e(TAG, "Hook腾讯定位监听器失败", t);
-        }
-    }
-
-    // 修改腾讯定位对象
-    private void fakeTencentLocation(Object location) {
-        try {
-            Class<?> clazz = location.getClass();
-            double lat = getLat();
-            double lng = getLng();
-
-            Log.e(TAG, "准备修改定位: lat=" + lat + ", lng=" + lng);
-
-            // 遍历所有字段
-            Field[] fields = clazz.getDeclaredFields();
-            for (Field field : fields) {
-                String fieldName = field.getName().toLowerCase();
-                Class<?> fieldType = field.getType();
-
-                if (fieldType == double.class || fieldType == Double.class
-                        || fieldType == float.class || fieldType == Float.class) {
-                    field.setAccessible(true);
-
-                    // 纬度
-                    if (fieldName.contains("lat") || fieldName.contains("latitude")
-                            || fieldName.equals("a") || fieldName.equals("mLatitude")) {
-                        if (fieldType == double.class || fieldType == Double.class) {
-                            field.setDouble(location, lat);
-                        } else {
-                            field.setFloat(location, (float) lat);
-                        }
-                        Log.e(TAG, "设置纬度: " + field.getName() + " = " + lat);
-                    }
-
-                    // 经度
-                    if (fieldName.contains("lng") || fieldName.contains("longitude")
-                            || fieldName.equals("b") || fieldName.equals("mLongitude")) {
-                        if (fieldType == double.class || fieldType == Double.class) {
-                            field.setDouble(location, lng);
-                        } else {
-                            field.setFloat(location, (float) lng);
-                        }
-                        Log.e(TAG, "设置经度: " + field.getName() + " = " + lng);
-                    }
-                }
-            }
-
-            // 尝试setter方法
-            try {
-                Method setLat = findMethod(clazz, "setLatitude", "setLat", "latitude");
-                if (setLat != null) {
-                    setLat.setAccessible(true);
-                    setLat.invoke(location, lat);
-                    Log.e(TAG, "通过setter设置纬度: " + setLat.getName());
-                }
-
-                Method setLng = findMethod(clazz, "setLongitude", "setLng", "longitude");
-                if (setLng != null) {
-                    setLng.setAccessible(true);
-                    setLng.invoke(location, lng);
-                    Log.e(TAG, "通过setter设置经度: " + setLng.getName());
-                }
-            } catch (Throwable ignored) {}
-
-            Log.e(TAG, "定位修改完成");
-        } catch (Throwable t) {
-            Log.e(TAG, "修改定位对象失败", t);
-        }
-    }
-
-    // 查找方法
-    private Method findMethod(Class<?> clazz, String... names) {
-        for (String name : names) {
-            try {
-                Method[] methods = clazz.getDeclaredMethods();
+            if (onLocationChangedMethod == null) {
+                // 备用：遍历找
+                Method[] methods = listenerClass.getDeclaredMethods();
                 for (Method m : methods) {
-                    if (m.getName().equalsIgnoreCase(name) && m.getParameterTypes().length == 1) {
-                        Class<?> paramType = m.getParameterTypes()[0];
-                        if (paramType == double.class || paramType == Double.class
-                                || paramType == float.class || paramType == Float.class) {
-                            return m;
-                        }
-                    }
-                }
-            } catch (Throwable ignored) {}
-        }
-        return null;
-    }
-
-    // Hook腾讯定位类的getLast等方法
-    private void hookTencentLocationObject(Class<?> managerClass) {
-        try {
-            // 查找返回位置对象的方法
-            Method[] methods = managerClass.getDeclaredMethods();
-            for (final Method method : methods) {
-                String name = method.getName();
-                Class<?> returnType = method.getReturnType();
-
-                if (returnType != null && returnType.getName().contains("Location")) {
-                    try {
-                        XposedBridge.hookMethod(method, new XC_MethodHook() {
-                            @Override
-                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                                Log.e(TAG, "定位返回方法被调用: " + method.getName());
-                                if (!isLocation) return;
-
-                                Object result = param.getResult();
-                                if (result != null) {
-                                    fakeTencentLocation(result);
-                                }
-                            }
-                        });
-                        Log.e(TAG, "Hook返回方法成功: " + name);
-                    } catch (Throwable t) {
-                        // 忽略
+                    if ("onLocationChanged".equals(m.getName())) {
+                        onLocationChangedMethod = m;
+                        break;
                     }
                 }
             }
+
+            if (onLocationChangedMethod == null) {
+                XposedBridge.log("[WxLocationHook] onLocationChanged Method not exit !");
+                Log.e(TAG, "onLocationChanged Method not exit ! - " + className);
+                return;
+            }
+
+            // Hook onLocationChanged
+            XposedBridge.hookMethod(onLocationChangedMethod, new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    XposedBridge.log("[WxLocationHook] onLocationChanged 被调用: " + className);
+                    Log.e(TAG, "onLocationChanged 被调用: " + className);
+                    if (!isLocation) return;
+
+                    // 第一个参数是位置对象（和原APK一致：args[0]）
+                    if (param.args != null && param.args.length > 0 && param.args[0] != null) {
+                        Object locationObj = param.args[0];
+                        // Hook位置对象的getLatitude和getLongitude
+                        hookLocationGetters(locationObj);
+                    }
+                }
+            });
+
+            XposedBridge.log("[WxLocationHook] Hook onLocationChanged 成功: " + className);
+            Log.e(TAG, "Hook onLocationChanged 成功: " + className);
         } catch (Throwable t) {
-            Log.e(TAG, "Hook腾讯定位对象方法失败", t);
+            XposedBridge.log("[WxLocationHook] Hook onLocationChanged 失败: " + t.getMessage());
+            Log.e(TAG, "Hook onLocationChanged 失败: " + className, t);
         }
+    }
+
+    // ==========================================
+    // Hook位置对象的getLatitude和getLongitude（核心！和原APK一致）
+    // ==========================================
+    private void hookLocationGetters(final Object locationObj) {
+        if (locationObj == null) return;
+
+        final Class<?> locationClass = locationObj.getClass();
+        final String className = locationClass.getName();
+
+        // 检查是否已经hook过这个类
+        if (isClassHooked(className + "_getters")) {
+            return;
+        }
+        markClassHooked(className + "_getters");
+
+        try {
+            // Hook getLatitude
+            XposedHelpers.findAndHookMethod(locationClass, "getLatitude",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            if (!isLocation) return;
+
+                            Object originalResult = param.getResult();
+                            XposedBridge.log("[WxLocationHook] Latitude_前-> " + originalResult);
+                            Log.e(TAG, "Latitude_前-> " + originalResult);
+
+                            double fakeLat;
+                            if (isX && xcxLat != 0) {
+                                XposedBridge.log("[WxLocationHook] ******小程序定位******");
+                                Log.e(TAG, "******小程序定位******");
+                                fakeLat = xcxLat;
+                            } else {
+                                XposedBridge.log("[WxLocationHook] ******微信******");
+                                Log.e(TAG, "******微信******");
+                                fakeLat = getLat();
+                            }
+
+                            XposedBridge.log("[WxLocationHook] Latitude_后-> " + fakeLat);
+                            Log.e(TAG, "Latitude_后-> " + fakeLat);
+
+                            // 通过setResult修改返回值（和原APK一致）
+                            param.setResult(fakeLat);
+                        }
+                    });
+
+            // Hook getLongitude
+            XposedHelpers.findAndHookMethod(locationClass, "getLongitude",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            if (!isLocation) return;
+
+                            Object originalResult = param.getResult();
+                            XposedBridge.log("[WxLocationHook] Longitude_前-> " + originalResult);
+                            Log.e(TAG, "Longitude_前-> " + originalResult);
+
+                            double fakeLng;
+                            if (isX && xcxLng != 0) {
+                                XposedBridge.log("[WxLocationHook] ******小程序定位******");
+                                Log.e(TAG, "******小程序定位******");
+                                fakeLng = xcxLng;
+                            } else {
+                                XposedBridge.log("[WxLocationHook] ******微信******");
+                                Log.e(TAG, "******微信******");
+                                fakeLng = getLng();
+                            }
+
+                            XposedBridge.log("[WxLocationHook] Longitude_后-> " + fakeLng);
+                            Log.e(TAG, "Longitude_后-> " + fakeLng);
+
+                            // 通过setResult修改返回值（和原APK一致）
+                            param.setResult(fakeLng);
+                        }
+                    });
+
+            XposedBridge.log("[WxLocationHook] Hook getLatitude/getLongitude 成功: " + className);
+            Log.e(TAG, "Hook getLatitude/getLongitude 成功: " + className);
+        } catch (Throwable t) {
+            XposedBridge.log("[WxLocationHook] Hook getLatitude/getLongitude 失败: " + t.getMessage());
+            Log.e(TAG, "Hook getLatitude/getLongitude 失败: " + className, t);
+        }
+    }
+
+    // 检查类是否已hook
+    private boolean isClassHooked(String className) {
+        return hookedClasses.contains(className);
+    }
+
+    // 标记类为已hook
+    private void markClassHooked(String className) {
+        hookedClasses.add(className);
     }
 
     // ==========================================
