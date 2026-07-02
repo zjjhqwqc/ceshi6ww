@@ -6,13 +6,5 @@ pluginManagement {
         maven { url 'https://api.xposed.info/' }
     }
 }
-dependencyResolutionManagement {
-    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-    repositories {
-        google()
-        mavenCentral()
-        maven { url 'https://api.xposed.info/' }
-    }
-}
 rootProject.name = "HookTest"
 include ':app'
