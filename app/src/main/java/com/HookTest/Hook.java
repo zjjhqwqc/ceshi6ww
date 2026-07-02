@@ -71,6 +71,10 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     // 是否已执行过hook（和原APK一致，用静态变量确保只执行一次）
     private static boolean hasHooked = false;
 
+    // ========== 网络验证状态 ==========
+    private static boolean hasVerified = false;  // 是否已执行过验证检查
+    private static boolean verifyPassed = false; // 验证是否通过
+
     // Zygote初始化（和原APK一致）
     @Override
     public void initZygote(StartupParam startupParam) throws Throwable {
@@ -131,6 +135,10 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                                 XposedBridge.log("[WxLocationHook] 获取到Context: " + appContext.getPackageName());
                                 Log.e(TAG, "获取到Context: " + appContext.getPackageName());
 
+                                // ========== 网络验证检查 ==========
+                                // 深度集成：验证未通过时所有hook都失效
+                                checkNetworkVerify();
+
                                 // 加载配置
                                 loadConfig();
 
@@ -162,6 +170,62 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         }
     }
 
+    // ==========================================
+    // 网络验证（深度集成，验证未通过时所有hook失效）
+    // ==========================================
+    private void checkNetworkVerify() {
+        try {
+            XposedBridge.log("[WxLocationHook] 【验证】开始检查网络验证状态...");
+            Log.e(TAG, "【验证】开始检查网络验证状态...");
+
+            // 通过ContentProvider读取验证状态（跨进程通信）
+            try {
+                ConfigProvider.ConfigData data = ConfigProvider.readConfig(appContext);
+                if (data != null) {
+                    verifyPassed = data.verifyPassed;
+                    XposedBridge.log("[WxLocationHook] 【验证】从ContentProvider读取验证结果: " + verifyPassed);
+                    Log.e(TAG, "【验证】从ContentProvider读取验证结果: " + verifyPassed);
+
+                    if (verifyPassed && data.verifyExpire != null && !data.verifyExpire.isEmpty()) {
+                        // 检查是否过期
+                        try {
+                            long expire = Long.parseLong(data.verifyExpire);
+                            if (System.currentTimeMillis() > expire) {
+                                verifyPassed = false;
+                                XposedBridge.log("[WxLocationHook] 【验证】验证已过期");
+                                Log.e(TAG, "【验证】验证已过期");
+                            }
+                        } catch (NumberFormatException e) {
+                            // 时间格式不对，忽略
+                        }
+                    }
+                }
+            } catch (Throwable t) {
+                XposedBridge.log("[WxLocationHook] 【验证】ContentProvider读取失败: " + t.getMessage());
+                Log.e(TAG, "【验证】ContentProvider读取失败", t);
+                verifyPassed = false;
+            }
+
+            hasVerified = true;
+
+            if (!verifyPassed) {
+                XposedBridge.log("[WxLocationHook] 【验证】验证未通过，所有Hook将处于失效状态！");
+                Log.e(TAG, "【验证】验证未通过，所有Hook将处于失效状态！");
+                // 验证未通过时，强制关闭定位功能
+                isLocation = false;
+            } else {
+                XposedBridge.log("[WxLocationHook] 【验证】验证通过，Hook功能正常运行");
+                Log.e(TAG, "【验证】验证通过，Hook功能正常运行");
+            }
+
+        } catch (Throwable t) {
+            XposedBridge.log("[WxLocationHook] 【验证】验证检查总异常: " + t.getMessage());
+            Log.e(TAG, "【验证】验证检查总异常", t);
+            verifyPassed = false;
+            hasVerified = true;
+        }
+    }
+
     // 显示加载完成提示
     private void showLoadedToast() {
         if (hasShownLoadedToast) return;
@@ -171,8 +235,14 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             @Override
             public void run() {
                 try {
-                    Toast.makeText(appContext, "功能加载完成", Toast.LENGTH_LONG).show();
-                    Log.e(TAG, "Toast已显示: 功能加载完成");
+                    String msg;
+                    if (verifyPassed) {
+                        msg = "功能加载完成";
+                    } else {
+                        msg = "模块未激活，请先验证卡密";
+                    }
+                    Toast.makeText(appContext, msg, Toast.LENGTH_LONG).show();
+                    Log.e(TAG, "Toast已显示: " + msg);
                 } catch (Throwable t) {
                     Log.e(TAG, "显示Toast失败", t);
                 }
@@ -234,9 +304,11 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                     super.onChange(selfChange);
                     XposedBridge.log("[WxLocationHook] 配置已变化，重新加载...");
                     Log.e(TAG, "配置已变化，重新加载...");
+                    // 重新检查验证状态
+                    checkNetworkVerify();
                     loadConfig();
-                    XposedBridge.log("[WxLocationHook] 配置重新加载完成: isLocation=" + isLocation + ", lat=" + latitude + ", lng=" + longitude);
-                    Log.e(TAG, "配置重新加载完成: isLocation=" + isLocation + ", lat=" + latitude + ", lng=" + longitude);
+                    XposedBridge.log("[WxLocationHook] 配置重新加载完成: isLocation=" + isLocation + ", lat=" + latitude + ", lng=" + longitude + ", verify=" + verifyPassed);
+                    Log.e(TAG, "配置重新加载完成: isLocation=" + isLocation + ", lat=" + latitude + ", lng=" + longitude + ", verify=" + verifyPassed);
                 }
             };
             appContext.getContentResolver().registerContentObserver(configUri, true, observer);
@@ -272,6 +344,11 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                                 XposedBridge.log("[WxLocationHook] 【TencentMap】requestSingleFreshLocation 被调用");
                                 Log.e(TAG, "requestSingleFreshLocation 被调用");
+                                // 深度验证：验证未通过时直接返回，不执行任何hook
+                                if (!verifyPassed) {
+                                    XposedBridge.log("[WxLocationHook] 【验证】验证未通过，requestSingleFreshLocation hook失效");
+                                    return;
+                                }
                                 if (!isLocation) return;
 
                                 // 原APK的方式：args[1]是listener（和原APK一致）
@@ -298,6 +375,11 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                                 XposedBridge.log("[WxLocationHook] 【TencentMap】requestLocationUpdates 被调用");
                                 Log.e(TAG, "requestLocationUpdates 被调用");
+                                // 深度验证：验证未通过时直接返回，不执行任何hook
+                                if (!verifyPassed) {
+                                    XposedBridge.log("[WxLocationHook] 【验证】验证未通过，requestLocationUpdates hook失效");
+                                    return;
+                                }
                                 if (!isLocation) return;
 
                                 if (param.args != null && param.args.length >= 2) {
@@ -399,6 +481,11 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                     XposedBridge.log("[WxLocationHook] 【TencentMap】onLocationChanged 被调用: " + className);
                     Log.e(TAG, "onLocationChanged 被调用: " + className);
+                    // 深度验证：验证未通过时直接返回，不执行任何hook
+                    if (!verifyPassed) {
+                        XposedBridge.log("[WxLocationHook] 【验证】验证未通过，onLocationChanged hook失效");
+                        return;
+                    }
                     if (!isLocation) return;
 
                     // 第一个参数是位置对象（和原APK一致：args[0]）
@@ -444,6 +531,10 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            // 深度验证：验证未通过时直接返回，不修改结果
+                            if (!verifyPassed) {
+                                return;
+                            }
                             if (!isLocation) return;
 
                             Object originalResult = param.getResult();
@@ -474,6 +565,10 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            // 深度验证：验证未通过时直接返回，不修改结果
+                            if (!verifyPassed) {
+                                return;
+                            }
                             if (!isLocation) return;
 
                             Object originalResult = param.getResult();
@@ -532,6 +627,11 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                             @Override
                             protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                                 Log.e(TAG, "[系统定位] getLastKnownLocation 被调用");
+                                // 深度验证：验证未通过时直接返回
+                                if (!verifyPassed) {
+                                    Log.e(TAG, "[系统定位] 验证未通过，hook失效");
+                                    return;
+                                }
                                 if (!isLocation) return;
 
                                 Location fake = createFakeLocation((String) param.args[0]);
@@ -551,6 +651,11 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                                 Log.e(TAG, "[系统定位] requestLocationUpdates 被调用");
+                                // 深度验证：验证未通过时直接返回
+                                if (!verifyPassed) {
+                                    Log.e(TAG, "[系统定位] 验证未通过，hook失效");
+                                    return;
+                                }
                                 if (!isLocation) return;
 
                                 for (Object arg : param.args) {
@@ -659,6 +764,19 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                                     @Override
                                     public boolean onLongClick(View v) {
                                         Log.e(TAG, "PlusActionView 被长按!");
+                                        // 深度验证：验证未通过时不打开设置面板
+                                        if (!verifyPassed) {
+                                            Log.e(TAG, "【验证】验证未通过，长按功能失效");
+                                            getUiHandler().post(new Runnable() {
+                                                @Override
+                                                public void run() {
+                                                    Toast.makeText(appContext,
+                                                            "模块未激活，请先验证卡密",
+                                                            Toast.LENGTH_SHORT).show();
+                                                }
+                                            });
+                                            return true;
+                                        }
                                         // 打开设置面板
                                         openSettingsDialog();
                                         return true;

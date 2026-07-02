@@ -55,9 +55,17 @@ public class MainActivity extends Activity {
     private Switch locationSwitch;
     private Switch xcxSwitch;
 
+    // 验证状态
+    private boolean isVerified = false;
+    private TextView verifyStatusText;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // 初始化验证系统
+        ShuanQVerifier.init(this);
+        isVerified = ShuanQVerifier.isVerified();
 
         loadPrefs();
         setContentView(createMainView());
@@ -81,6 +89,109 @@ public class MainActivity extends Activity {
         titleParams.bottomMargin = dp2px(20);
         titleView.setLayoutParams(titleParams);
         mainLayout.addView(titleView);
+
+        // ========== 验证状态卡片 ==========
+        LinearLayout verifyCardLayout = new LinearLayout(this);
+        verifyCardLayout.setOrientation(LinearLayout.VERTICAL);
+        verifyCardLayout.setPadding(dp2px(16), dp2px(16), dp2px(16), dp2px(16));
+        verifyCardLayout.setBackgroundColor(0xFFFFFFFF);
+        LinearLayout.LayoutParams verifyCardParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        verifyCardParams.bottomMargin = dp2px(12);
+        verifyCardLayout.setLayoutParams(verifyCardParams);
+
+        // 验证状态标题行
+        LinearLayout verifyTitleRow = new LinearLayout(this);
+        verifyTitleRow.setOrientation(LinearLayout.HORIZONTAL);
+        verifyTitleRow.setGravity(Gravity.CENTER_VERTICAL);
+        verifyTitleRow.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        TextView verifyTitle = new TextView(this);
+        verifyTitle.setText("卡密验证");
+        verifyTitle.setTextColor(0xFF333333);
+        verifyTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        verifyTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams verifyTitleParams = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
+        verifyTitle.setLayoutParams(verifyTitleParams);
+        verifyTitleRow.addView(verifyTitle);
+
+        verifyStatusText = new TextView(this);
+        updateVerifyStatusText();
+        verifyStatusText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        verifyTitleRow.addView(verifyStatusText);
+        verifyCardLayout.addView(verifyTitleRow);
+
+        // 卡密输入框
+        final EditText cardInput = new EditText(this);
+        cardInput.setHint("请输入卡密");
+        cardInput.setText(ShuanQVerifier.getCardCode());
+        cardInput.setTextColor(0xFF333333);
+        cardInput.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        cardInput.setBackgroundResource(android.R.drawable.edit_text);
+        cardInput.setPadding(dp2px(12), dp2px(10), dp2px(12), dp2px(10));
+        LinearLayout.LayoutParams cardInputParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        cardInputParams.topMargin = dp2px(12);
+        cardInput.setLayoutParams(cardInputParams);
+        verifyCardLayout.addView(cardInput);
+
+        // 验证按钮行
+        LinearLayout btnRow = new LinearLayout(this);
+        btnRow.setOrientation(LinearLayout.HORIZONTAL);
+        btnRow.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams btnRowParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        btnRowParams.topMargin = dp2px(12);
+        btnRow.setLayoutParams(btnRowParams);
+
+        Button verifyBtn = new Button(this);
+        verifyBtn.setText("验证卡密");
+        verifyBtn.setTextColor(0xFFFFFFFF);
+        verifyBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        verifyBtn.setBackgroundColor(0xFF4CAF50);
+        verifyBtn.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams verifyBtnParams = new LinearLayout.LayoutParams(
+                0, dp2px(40), 1);
+        verifyBtnParams.rightMargin = dp2px(8);
+        verifyBtn.setLayoutParams(verifyBtnParams);
+        verifyBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                String card = cardInput.getText().toString().trim();
+                if (card.isEmpty()) {
+                    Toast.makeText(MainActivity.this, "请输入卡密", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                doVerify(card);
+            }
+        });
+        btnRow.addView(verifyBtn);
+
+        Button clearVerifyBtn = new Button(this);
+        clearVerifyBtn.setText("清除验证");
+        clearVerifyBtn.setTextColor(0xFFFFFFFF);
+        clearVerifyBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        clearVerifyBtn.setBackgroundColor(0xFFF44336);
+        clearVerifyBtn.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams clearBtnParams = new LinearLayout.LayoutParams(
+                0, dp2px(40), 1);
+        clearBtnParams.leftMargin = dp2px(8);
+        clearVerifyBtn.setLayoutParams(clearBtnParams);
+        clearVerifyBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                ShuanQVerifier.clearVerify(MainActivity.this);
+                isVerified = false;
+                updateVerifyStatusText();
+                Toast.makeText(MainActivity.this, "验证已清除", Toast.LENGTH_SHORT).show();
+            }
+        });
+        btnRow.addView(clearVerifyBtn);
+        verifyCardLayout.addView(btnRow);
+
+        mainLayout.addView(verifyCardLayout);
 
         // 卡片容器
         LinearLayout cardLayout = new LinearLayout(this);
@@ -440,6 +551,49 @@ public class MainActivity extends Activity {
         dialog.getWindow().setAttributes(lp);
 
         dialog.show();
+    }
+
+    // ==========================================
+    // 网络验证相关方法
+    // ==========================================
+
+    /**
+     * 更新验证状态显示文字
+     */
+    private void updateVerifyStatusText() {
+        if (verifyStatusText == null) return;
+        if (isVerified) {
+            verifyStatusText.setText("已激活");
+            verifyStatusText.setTextColor(0xFF4CAF50);
+        } else {
+            verifyStatusText.setText("未激活");
+            verifyStatusText.setTextColor(0xFFF44336);
+        }
+    }
+
+    /**
+     * 执行卡密验证
+     */
+    private void doVerify(final String card) {
+        Toast.makeText(this, "正在验证...", Toast.LENGTH_SHORT).show();
+
+        ShuanQVerifier.verifyCard(this, card, new ShuanQVerifier.VerifyCallback() {
+            @Override
+            public void onSuccess(String cardInfo) {
+                isVerified = true;
+                updateVerifyStatusText();
+                Toast.makeText(MainActivity.this,
+                        "验证成功！\n" + cardInfo, Toast.LENGTH_LONG).show();
+            }
+
+            @Override
+            public void onFailure(String errorMsg) {
+                isVerified = false;
+                updateVerifyStatusText();
+                Toast.makeText(MainActivity.this,
+                        "验证失败: " + errorMsg, Toast.LENGTH_LONG).show();
+            }
+        });
     }
 
     @SuppressLint("ApplySharedPref")

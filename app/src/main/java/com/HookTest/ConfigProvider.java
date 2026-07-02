@@ -27,12 +27,20 @@ public class ConfigProvider extends ContentProvider {
     public static final String KEY_LONGITUDE = "longitude";
     public static final String KEY_GPS_PLACE = "gpsPlace";
 
+    // 验证状态键名
+    public static final String KEY_VERIFY_PASSED = "verify_passed";
+    public static final String KEY_VERIFY_CARD = "verify_card";
+    public static final String KEY_VERIFY_EXPIRE = "verify_expire";
+
     private static final String[] ALL_KEYS = {
             KEY_LOCATION_ENABLED,
             KEY_XCX_ENABLED,
             KEY_LATITUDE,
             KEY_LONGITUDE,
-            KEY_GPS_PLACE
+            KEY_GPS_PLACE,
+            KEY_VERIFY_PASSED,
+            KEY_VERIFY_CARD,
+            KEY_VERIFY_EXPIRE
     };
 
     @Override
@@ -59,6 +67,8 @@ public class ConfigProvider extends ContentProvider {
             if (KEY_LOCATION_ENABLED.equals(key)) {
                 row.add(sp.getBoolean(key, false) ? "1" : "0");
             } else if (KEY_XCX_ENABLED.equals(key)) {
+                row.add(sp.getBoolean(key, false) ? "1" : "0");
+            } else if (KEY_VERIFY_PASSED.equals(key)) {
                 row.add(sp.getBoolean(key, false) ? "1" : "0");
             } else {
                 row.add(sp.getString(key, ""));
@@ -145,6 +155,12 @@ public class ConfigProvider extends ContentProvider {
                         data.longitude = value;
                     } else if (KEY_GPS_PLACE.equals(colName)) {
                         data.gpsPlace = value;
+                    } else if (KEY_VERIFY_PASSED.equals(colName)) {
+                        data.verifyPassed = "1".equals(value);
+                    } else if (KEY_VERIFY_CARD.equals(colName)) {
+                        data.verifyCard = value;
+                    } else if (KEY_VERIFY_EXPIRE.equals(colName)) {
+                        data.verifyExpire = value;
                     }
                 }
                 cursor.close();
@@ -176,5 +192,9 @@ public class ConfigProvider extends ContentProvider {
         public String latitude = "39.908823";
         public String longitude = "116.397470";
         public String gpsPlace = "北京市东城区";
+        // 验证状态
+        public boolean verifyPassed = false;
+        public String verifyCard = "";
+        public String verifyExpire = "";
     }
 }
