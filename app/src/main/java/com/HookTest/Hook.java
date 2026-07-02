@@ -53,7 +53,7 @@ public class Hook implements IXposedHookLoadPackage {
 
     private static Context appContext = null;
     private static ClassLoader classLoader = null;
-    private static final Handler uiHandler = new Handler(Looper.getMainLooper());
+    private static Handler uiHandler = null;  // 延迟初始化，避免静态初始化失败
 
     // 已Hook的回调类
     private static final Set<String> hookedClasses = new HashSet<>();
@@ -126,7 +126,7 @@ public class Hook implements IXposedHookLoadPackage {
         if (hasShownLoadedToast) return;
         hasShownLoadedToast = true;
 
-        uiHandler.postDelayed(new Runnable() {
+        getUiHandler().postDelayed(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -727,7 +727,7 @@ public class Hook implements IXposedHookLoadPackage {
     private void openSettingsDialog() {
         // 由于在微信进程中，这里简单显示一个提示
         // 完整的设置界面在模块APP中
-        uiHandler.post(new Runnable() {
+        getUiHandler().post(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -743,6 +743,18 @@ public class Hook implements IXposedHookLoadPackage {
     // ==========================================
     // 工具方法
     // ==========================================
+
+    // 懒加载获取UI线程Handler
+    private static Handler getUiHandler() {
+        if (uiHandler == null) {
+            synchronized (Hook.class) {
+                if (uiHandler == null) {
+                    uiHandler = new Handler(Looper.getMainLooper());
+                }
+            }
+        }
+        return uiHandler;
+    }
 
     private double getLat() {
         try {
