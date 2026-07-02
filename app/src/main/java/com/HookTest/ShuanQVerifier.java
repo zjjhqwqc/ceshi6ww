@@ -181,6 +181,24 @@ public class ShuanQVerifier {
     }
 
     /**
+     * 设置卡密（用于Hook端等其他进程初始化心跳时设置）
+     */
+    public static void setCardCode(String card) {
+        cardCode = card;
+    }
+
+    /**
+     * 设置验证状态（用于Hook端等其他进程同步状态）
+     */
+    public static void setVerified(boolean verified, long expireTimeMs) {
+        isVerified = verified;
+        if (verified) {
+            expireTime = expireTimeMs;
+            lastVerifyTime = System.currentTimeMillis();
+        }
+    }
+
+    /**
      * 获取设备唯一标识（Android ID）
      */
     public static String getDeviceId(Context context) {

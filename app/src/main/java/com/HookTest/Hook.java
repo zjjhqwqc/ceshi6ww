@@ -19,6 +19,8 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.Timer;
+import java.util.TimerTask;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.IXposedHookZygoteInit;
@@ -81,6 +83,14 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     // 重试计数
     private static int retryCount = 0;
     private static final int MAX_RETRY = 5;
+
+    // Hook端心跳相关
+    private static Timer heartbeatTimer = null;
+    private static boolean heartbeatRunning = false;
+    private static final int HEARTBEAT_INTERVAL = 50000; // 50秒一次，与原SDK一致
+    private static String hookCardCode = "";
+    private static String hookUserToken = "";
+    private static long hookExpireTime = 0;
 
     // Zygote初始化（和原APK一致）
     @Override
@@ -361,27 +371,14 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 Log.e(TAG, "【验证】验证未通过，所有Hook将处于失效状态！");
                 // 验证未通过时，强制关闭定位功能
                 isLocation = false;
+                // 停止心跳
+                stopHookHeartbeat();
             } else {
                 XposedBridge.log("[WxLocationHook] 【验证】验证通过，Hook功能正常运行");
                 Log.e(TAG, "【验证】验证通过，Hook功能正常运行");
 
-                // 验证通过后，尝试触发一次心跳验证（在后台线程）
-                try {
-                    new Thread(new Runnable() {
-                        @Override
-                        public void run() {
-                            try {
-                                // 尝试通过ContentProvider触发心跳（通过写入配置触发模块端的心跳）
-                                // 这里简化处理：验证状态已经通过，主要依赖模块端的心跳
-                                XposedBridge.log("[WxLocationHook] 【验证】验证通过，等待模块端心跳维护");
-                            } catch (Throwable t) {
-                                Log.e(TAG, "【验证】心跳触发失败", t);
-                            }
-                        }
-                    }).start();
-                } catch (Throwable t) {
-                    Log.e(TAG, "【验证】启动心跳线程失败", t);
-                }
+                // 验证通过后，启动Hook端独立心跳（不依赖模块端）
+                startHookHeartbeat();
             }
 
         } catch (Throwable t) {
@@ -596,6 +593,60 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 Log.e(TAG, "Hook requestLocationUpdates 失败", t);
             }
 
+            // Hook getLastKnownLocation - 直接修改返回值
+            try {
+                XposedBridge.hookAllMethods(tencentLocationClass, "getLastKnownLocation",
+                        new XC_MethodHook() {
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                                XposedBridge.log("[WxLocationHook] 【TencentMap】getLastKnownLocation 被调用");
+                                Log.e(TAG, "getLastKnownLocation 被调用");
+                                if (!verifyPassed || !isLocation) return;
+
+                                Object result = param.getResult();
+                                if (result != null) {
+                                    // 修改返回的位置对象
+                                    modifyLocationObject(result);
+                                    XposedBridge.log("[WxLocationHook] 【TencentMap】getLastKnownLocation 已修改");
+                                }
+                            }
+                        });
+                XposedBridge.log("[WxLocationHook] 【TencentMap】Hook getLastKnownLocation 成功");
+                Log.e(TAG, "Hook getLastKnownLocation 成功");
+            } catch (Throwable t) {
+                XposedBridge.log("[WxLocationHook] 【TencentMap】Hook getLastKnownLocation 失败: " + t.getMessage());
+                Log.e(TAG, "Hook getLastKnownLocation 失败", t);
+            }
+
+            // Hook getPoiList - 搜索附近POI时也返回假位置
+            try {
+                XposedBridge.hookAllMethods(tencentLocationClass, "getPoiList",
+                        new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                XposedBridge.log("[WxLocationHook] 【TencentMap】getPoiList 被调用");
+                                Log.e(TAG, "getPoiList 被调用");
+                                if (!verifyPassed || !isLocation) return;
+
+                                // 查找location参数并修改
+                                if (param.args != null) {
+                                    for (int i = 0; i < param.args.length; i++) {
+                                        Object arg = param.args[i];
+                                        if (arg != null && isLocationObject(arg)) {
+                                            modifyLocationObject(arg);
+                                            XposedBridge.log("[WxLocationHook] 【TencentMap】getPoiList 参数已修改");
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                XposedBridge.log("[WxLocationHook] 【TencentMap】Hook getPoiList 成功");
+                Log.e(TAG, "Hook getPoiList 成功");
+            } catch (Throwable t) {
+                XposedBridge.log("[WxLocationHook] 【TencentMap】Hook getPoiList 失败: " + t.getMessage());
+                Log.e(TAG, "Hook getPoiList 失败", t);
+            }
+
             XposedBridge.log("[WxLocationHook] 【TencentMap】start TencentMap... 完成");
             Log.e(TAG, "start TencentMap... 完成");
 
@@ -695,7 +746,9 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                     // 第一个参数是位置对象（和原APK一致：args[0]）
                     if (param.args != null && param.args.length > 0 && param.args[0] != null) {
                         Object locationObj = param.args[0];
-                        // Hook位置对象的getLatitude和getLongitude
+                        // 直接修改位置对象的字段值（最可靠的方式）
+                        modifyLocationObject(locationObj);
+                        // Hook位置对象的getLatitude和getLongitude（双重保险）
                         hookLocationGetters(locationObj);
                     }
                 }
@@ -1106,6 +1159,264 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             Log.e(TAG, "小程序坐标已更新: " + xcxLat + ", " + xcxLng);
         } catch (Throwable t) {
             Log.e(TAG, "更新小程序坐标失败", t);
+        }
+    }
+
+    // ==========================================
+    // 位置对象修改工具方法
+    // ==========================================
+
+    /**
+     * 判断对象是否是位置对象（有getLatitude/getLongitude方法）
+     */
+    private boolean isLocationObject(Object obj) {
+        if (obj == null) return false;
+        try {
+            Class<?> clazz = obj.getClass();
+            // 检查是否有getLatitude和getLongitude方法
+            Method[] methods = clazz.getMethods();
+            boolean hasLat = false;
+            boolean hasLng = false;
+            for (Method m : methods) {
+                if ("getLatitude".equals(m.getName())) hasLat = true;
+                if ("getLongitude".equals(m.getName())) hasLng = true;
+            }
+            return hasLat && hasLng;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * 直接修改位置对象的字段值（最可靠的方式）
+     * 同时修改double类型和float类型的字段
+     */
+    private void modifyLocationObject(Object locationObj) {
+        if (locationObj == null) return;
+        if (!verifyPassed || !isLocation) return;
+
+        double fakeLat = getLat();
+        double fakeLng = getLng();
+
+        try {
+            Class<?> clazz = locationObj.getClass();
+            Field[] fields = clazz.getDeclaredFields();
+            boolean modified = false;
+
+            for (Field field : fields) {
+                String fieldName = field.getName().toLowerCase();
+                try {
+                    field.setAccessible(true);
+                    Class<?> fieldType = field.getType();
+
+                    // 修改纬度字段
+                    if (fieldName.contains("lat") || fieldName.contains("latitude")) {
+                        if (fieldType == double.class || fieldType == Double.class) {
+                            field.setDouble(locationObj, fakeLat);
+                            modified = true;
+                            Log.e(TAG, "修改位置字段 " + field.getName() + " (double) -> " + fakeLat);
+                        } else if (fieldType == float.class || fieldType == Float.class) {
+                            field.setFloat(locationObj, (float) fakeLat);
+                            modified = true;
+                            Log.e(TAG, "修改位置字段 " + field.getName() + " (float) -> " + fakeLat);
+                        }
+                    }
+
+                    // 修改经度字段
+                    if (fieldName.contains("lng") || fieldName.contains("long") || fieldName.contains("longitude")) {
+                        if (fieldType == double.class || fieldType == Double.class) {
+                            field.setDouble(locationObj, fakeLng);
+                            modified = true;
+                            Log.e(TAG, "修改位置字段 " + field.getName() + " (double) -> " + fakeLng);
+                        } else if (fieldType == float.class || fieldType == Float.class) {
+                            field.setFloat(locationObj, (float) fakeLng);
+                            modified = true;
+                            Log.e(TAG, "修改位置字段 " + field.getName() + " (float) -> " + fakeLng);
+                        }
+                    }
+                } catch (Throwable t) {
+                    // 单个字段修改失败不影响其他
+                }
+            }
+
+            // 如果没有找到字段，尝试修改父类的字段
+            if (!modified) {
+                Class<?> superClass = clazz.getSuperclass();
+                while (superClass != null && !modified) {
+                    Field[] superFields = superClass.getDeclaredFields();
+                    for (Field field : superFields) {
+                        String fieldName = field.getName().toLowerCase();
+                        try {
+                            field.setAccessible(true);
+                            Class<?> fieldType = field.getType();
+
+                            if (fieldName.contains("lat") || fieldName.contains("latitude")) {
+                                if (fieldType == double.class || fieldType == Double.class) {
+                                    field.setDouble(locationObj, fakeLat);
+                                    modified = true;
+                                } else if (fieldType == float.class || fieldType == Float.class) {
+                                    field.setFloat(locationObj, (float) fakeLat);
+                                    modified = true;
+                                }
+                            }
+
+                            if (fieldName.contains("lng") || fieldName.contains("long") || fieldName.contains("longitude")) {
+                                if (fieldType == double.class || fieldType == Double.class) {
+                                    field.setDouble(locationObj, fakeLng);
+                                    modified = true;
+                                } else if (fieldType == float.class || fieldType == Float.class) {
+                                    field.setFloat(locationObj, (float) fakeLng);
+                                    modified = true;
+                                }
+                            }
+                        } catch (Throwable t) {
+                            // ignore
+                        }
+                    }
+                    superClass = superClass.getSuperclass();
+                }
+            }
+
+            if (modified) {
+                XposedBridge.log("[WxLocationHook] 【TencentMap】位置对象字段已修改: lat=" + fakeLat + ", lng=" + fakeLng);
+            } else {
+                XposedBridge.log("[WxLocationHook] 【TencentMap】位置对象字段修改失败，未找到经纬度字段");
+                Log.e(TAG, "位置对象类: " + locationObj.getClass().getName());
+                // 打印所有字段名便于调试
+                for (Field field : clazz.getDeclaredFields()) {
+                    Log.e(TAG, "  字段: " + field.getName() + " (" + field.getType().getName() + ")");
+                }
+            }
+
+        } catch (Throwable t) {
+            Log.e(TAG, "修改位置对象失败", t);
+        }
+    }
+
+    // ==========================================
+    // Hook端独立心跳验证（不依赖模块端）
+    // ==========================================
+
+    /**
+     * 启动Hook端心跳验证
+     * 微信进程中独立维护心跳，不依赖模块APP是否存活
+     */
+    private void startHookHeartbeat() {
+        if (heartbeatRunning) {
+            return;
+        }
+
+        // 从ContentProvider读取卡密和token信息
+        try {
+            ConfigProvider.ConfigData data = ConfigProvider.readConfig(appContext);
+            if (data != null) {
+                hookCardCode = data.verifyCard != null ? data.verifyCard : "";
+                if (data.verifyExpire != null && !data.verifyExpire.isEmpty()) {
+                    try {
+                        hookExpireTime = Long.parseLong(data.verifyExpire);
+                    } catch (NumberFormatException e) {
+                        hookExpireTime = 0;
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "【心跳】读取卡密信息失败", t);
+        }
+
+        if (hookCardCode == null || hookCardCode.isEmpty()) {
+            XposedBridge.log("[WxLocationHook] 【心跳】没有卡密，不启动心跳");
+            Log.e(TAG, "【心跳】没有卡密，不启动心跳");
+            return;
+        }
+
+        heartbeatTimer = new Timer();
+        heartbeatTimer.scheduleAtFixedRate(new TimerTask() {
+            @Override
+            public void run() {
+                doHookHeartbeat();
+            }
+        }, 0, HEARTBEAT_INTERVAL);
+
+        heartbeatRunning = true;
+        XposedBridge.log("[WxLocationHook] 【心跳】Hook端心跳已启动，间隔: " + (HEARTBEAT_INTERVAL / 1000) + "秒");
+        Log.e(TAG, "【心跳】Hook端心跳已启动，间隔: " + (HEARTBEAT_INTERVAL / 1000) + "秒");
+    }
+
+    /**
+     * 停止Hook端心跳
+     */
+    private void stopHookHeartbeat() {
+        if (heartbeatTimer != null) {
+            heartbeatTimer.cancel();
+            heartbeatTimer = null;
+        }
+        heartbeatRunning = false;
+        XposedBridge.log("[WxLocationHook] 【心跳】Hook端心跳已停止");
+        Log.e(TAG, "【心跳】Hook端心跳已停止");
+    }
+
+    /**
+     * 执行Hook端心跳验证
+     * 调用ShuanQVerifier的心跳逻辑（使用微信进程的Context）
+     */
+    private void doHookHeartbeat() {
+        try {
+            // 重新从ContentProvider读取最新的卡密和token
+            try {
+                ConfigProvider.ConfigData data = ConfigProvider.readConfig(appContext);
+                if (data != null && data.verifyCard != null && !data.verifyCard.isEmpty()) {
+                    hookCardCode = data.verifyCard;
+                    if (data.verifyExpire != null && !data.verifyExpire.isEmpty()) {
+                        try {
+                            hookExpireTime = Long.parseLong(data.verifyExpire);
+                        } catch (NumberFormatException e) {
+                            // ignore
+                        }
+                    }
+                }
+            } catch (Throwable t) {
+                Log.e(TAG, "【心跳】读取配置失败", t);
+            }
+
+            if (hookCardCode == null || hookCardCode.isEmpty()) {
+                verifyPassed = false;
+                isLocation = false;
+                stopHookHeartbeat();
+                return;
+            }
+
+            // 设置ShuanQVerifier的卡密和验证状态（微信进程中独立维护）
+            ShuanQVerifier.setCardCode(hookCardCode);
+            ShuanQVerifier.setVerified(verifyPassed, hookExpireTime);
+
+            // 使用ShuanQVerifier的心跳验证
+            ShuanQVerifier.heartbeatVerify(appContext);
+
+            // 检查验证结果
+            boolean passed = ShuanQVerifier.isVerified();
+            if (passed != verifyPassed) {
+                verifyPassed = passed;
+                XposedBridge.log("[WxLocationHook] 【心跳】验证状态变化: " + verifyPassed);
+                Log.e(TAG, "【心跳】验证状态变化: " + verifyPassed);
+
+                if (!verifyPassed) {
+                    isLocation = false;
+                    stopHookHeartbeat();
+                }
+            }
+
+            // 同步验证状态到ContentProvider（供其他进程使用）
+            try {
+                android.content.ContentValues values = new android.content.ContentValues();
+                values.put("verify_passed", verifyPassed);
+                ConfigProvider.writeConfig(appContext, values);
+            } catch (Throwable t) {
+                // ignore
+            }
+
+        } catch (Throwable t) {
+            Log.e(TAG, "【心跳】心跳验证异常", t);
+            // 网络异常时不立即失效，保留当前状态
         }
     }
 }

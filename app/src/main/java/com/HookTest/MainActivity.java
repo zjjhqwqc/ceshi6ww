@@ -2,6 +2,7 @@ package com.HookTest;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.Dialog;
 import android.content.ContentValues;
 import android.content.Context;
@@ -590,16 +591,24 @@ public class MainActivity extends Activity {
             public void onSuccess(String cardInfo) {
                 isVerified = true;
                 updateVerifyStatusText();
-                Toast.makeText(MainActivity.this,
-                        "验证成功！\n" + cardInfo, Toast.LENGTH_LONG).show();
+                // 使用AlertDialog显示验证成功信息（比Toast更清晰，内容完整可见）
+                new AlertDialog.Builder(MainActivity.this)
+                        .setTitle("验证成功")
+                        .setMessage(cardInfo)
+                        .setPositiveButton("确定", null)
+                        .show();
             }
 
             @Override
             public void onFailure(String errorMsg) {
                 isVerified = false;
                 updateVerifyStatusText();
-                Toast.makeText(MainActivity.this,
-                        "验证失败: " + errorMsg, Toast.LENGTH_LONG).show();
+                // 使用AlertDialog显示验证失败信息（比Toast更清晰，内容完整可见）
+                new AlertDialog.Builder(MainActivity.this)
+                        .setTitle("验证失败")
+                        .setMessage(errorMsg)
+                        .setPositiveButton("确定", null)
+                        .show();
             }
         });
     }
