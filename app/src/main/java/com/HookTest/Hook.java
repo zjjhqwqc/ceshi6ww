@@ -33,6 +33,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
     private static final String TAG = "WxLocationHook";
+    private static final String TARGET_PACKAGE = "com.tencent.mm";
     private static final String PREFS_NAME = "sqwx";
 
     // 配置键名 - 与原APK一致
@@ -93,7 +94,16 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             Log.e(TAG, "进程名: " + lpparam.processName);
             Log.e(TAG, "========================================");
 
-            // 和原APK一致：不判断包名，只确保只执行一次
+            // 判断是否是微信进程：同时检查包名和进程名
+            // MIUI系统可能出现packageName是com.miui.contentcatcher但processName是com.tencent.mm的情况
+            boolean isWeChat = TARGET_PACKAGE.equals(lpparam.packageName)
+                    || (lpparam.processName != null && lpparam.processName.startsWith(TARGET_PACKAGE));
+
+            if (!isWeChat) {
+                return; // 非微信进程，直接跳过
+            }
+
+            // 和原APK一致：确保每个进程只执行一次
             if (hasHooked) {
                 XposedBridge.log("[WxLocationHook] Application is already hook ! !");
                 Log.e(TAG, "Application is already hook ! !");
