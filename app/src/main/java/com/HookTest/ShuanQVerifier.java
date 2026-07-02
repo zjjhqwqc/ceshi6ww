@@ -268,9 +268,6 @@ public class ShuanQVerifier {
     }
 
     /**
-     * 心跳验证（检查卡密是否仍然有效）
-     */
-    /**
      * 心跳验证（与原SDK一致）
      * 调用 /api/card_app/get_card_info 接口
      * 参数包含：card, machine_code, update_active, user_token, request_safe_code
