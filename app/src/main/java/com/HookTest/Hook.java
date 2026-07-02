@@ -317,15 +317,44 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         Log.e(TAG, "(mapClass): " + className + " hook 成功了！！");
 
         try {
-            // 和原APK完全一致：参数顺序是 [null, int.class, String.class]
-            // 对应方法签名: onLocationChanged(TencentLocation location, int error, String reason)
-            Object[] paramTypes = new Object[3];
-            paramTypes[0] = null;           // 第一个参数：位置对象（任意引用类型）
-            paramTypes[1] = int.class;      // 第二个参数：int
-            paramTypes[2] = String.class;   // 第三个参数：String
+            // 查找 onLocationChanged 方法 - 遍历所有方法（最可靠的方式）
+            Method onLocationChangedMethod = null;
+            Method[] methods = listenerClass.getDeclaredMethods();
+            for (Method m : methods) {
+                if ("onLocationChanged".equals(m.getName())) {
+                    onLocationChangedMethod = m;
+                    XposedBridge.log("[WxLocationHook] 【TencentMap】找到onLocationChanged方法: " + m);
+                    Log.e(TAG, "找到onLocationChanged方法: " + m);
+                    break;
+                }
+            }
 
-            Method onLocationChangedMethod = XposedHelpers.findMethodBestMatch(
-                    listenerClass, "onLocationChanged", paramTypes);
+            if (onLocationChangedMethod == null) {
+                // 再试试父类和接口
+                Class<?> clazz = listenerClass.getSuperclass();
+                while (clazz != null && onLocationChangedMethod == null) {
+                    for (Method m : clazz.getDeclaredMethods()) {
+                        if ("onLocationChanged".equals(m.getName())) {
+                            onLocationChangedMethod = m;
+                            break;
+                        }
+                    }
+                    clazz = clazz.getSuperclass();
+                }
+                
+                // 再试试接口
+                if (onLocationChangedMethod == null) {
+                    for (Class<?> iface : listenerClass.getInterfaces()) {
+                        for (Method m : iface.getDeclaredMethods()) {
+                            if ("onLocationChanged".equals(m.getName())) {
+                                onLocationChangedMethod = m;
+                                break;
+                            }
+                        }
+                        if (onLocationChangedMethod != null) break;
+                    }
+                }
+            }
 
             if (onLocationChangedMethod == null) {
                 XposedBridge.log("[WxLocationHook] 【TencentMap】onLocationChanged Method not exit !");
