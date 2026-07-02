@@ -219,37 +219,66 @@ public class ShuanQVerifier {
                     // 解析响应
                     JSONObject jsonResponse = new JSONObject(response);
                     int code = jsonResponse.optInt("code", -1);
-                    String msg = jsonResponse.optString("msg", "未知错误");
+                    String msg = jsonResponse.optString("message", jsonResponse.optString("msg", "未知错误"));
 
                     if (code == 1) {
-                        // 验证成功
-                        JSONObject data = jsonResponse.optJSONObject("data");
-                        if (data != null && data.has("cardInfo")) {
-                            JSONObject cardInfo = data.getJSONObject("cardInfo");
-                            String expire = cardInfo.optString("expire_time", "");
+                        // 验证成功 - 解密data字段
+                        String encryptedData = jsonResponse.optString("data", "");
+                        String expire = "";
 
-                            // 保存验证状态
-                            isVerified = true;
-                            cardCode = card;
-                            lastVerifyTime = System.currentTimeMillis();
-                            // 默认为24小时有效期（可根据实际情况调整）
-                            expireTime = lastVerifyTime + 24 * 60 * 60 * 1000L;
+                        if (!encryptedData.isEmpty()) {
+                            try {
+                                // 解密data字段（Hex -> AES解密）
+                                byte[] dataBytes = hexStringToBytes(encryptedData);
+                                String decryptedData = decryptAES(dataBytes, AES_KEY);
+                                Log.d(TAG, "解密后的data: " + decryptedData);
 
-                            saveVerifyState(context);
-
-                            // 验证成功后启动心跳检测
-                            startHeartbeat(context);
-
-                            final String info = "卡密: " + card + "\n到期时间: " + expire;
-                            handler.post(new Runnable() {
-                                @Override
-                                public void run() {
-                                    callback.onSuccess(info);
+                                JSONObject dataObj = new JSONObject(decryptedData);
+                                if (dataObj.has("cardInfo")) {
+                                    JSONObject cardInfo = dataObj.getJSONObject("cardInfo");
+                                    expire = cardInfo.optString("expire_time", "");
+                                    // 获取endtime用于计算到期时间
+                                    long endTime = cardInfo.optLong("endtime", 0);
+                                    if (endTime > 0) {
+                                        expireTime = endTime * 1000L;
+                                    }
+                                    // 获取token
+                                    String token = cardInfo.optString("token", "");
+                                    if (!token.isEmpty()) {
+                                        userToken = token;
+                                    }
+                                } else {
+                                    // 没有cardInfo但code=1也算验证通过
+                                    Log.d(TAG, "解密后的data中没有cardInfo字段，数据: " + decryptedData);
                                 }
-                            });
-                        } else {
-                            throw new Exception("响应数据格式错误");
+                            } catch (Exception e) {
+                                Log.e(TAG, "解密响应data失败", e);
+                                // 解密失败但code=1，仍视为验证通过
+                            }
                         }
+
+                        // 如果没有从响应中获取到到期时间，使用默认24小时
+                        if (expireTime == 0) {
+                            expireTime = System.currentTimeMillis() + 24 * 60 * 60 * 1000L;
+                        }
+
+                        // 保存验证状态
+                        isVerified = true;
+                        cardCode = card;
+                        lastVerifyTime = System.currentTimeMillis();
+
+                        saveVerifyState(context);
+
+                        // 验证成功后启动心跳检测
+                        startHeartbeat(context);
+
+                        final String info = "卡密: " + card + "\n到期时间: " + (expire.isEmpty() ? "24小时" : expire);
+                        handler.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                callback.onSuccess(info);
+                            }
+                        });
                     } else {
                         throw new Exception(msg);
                     }
@@ -303,7 +332,7 @@ public class ShuanQVerifier {
                     // 解析响应
                     JSONObject jsonResponse = new JSONObject(response);
                     int code = jsonResponse.optInt("code", -1);
-                    String msg = jsonResponse.optString("msg", "未知错误");
+                    String msg = jsonResponse.optString("message", jsonResponse.optString("msg", "未知错误"));
 
                     if (code == 1) {
                         // 心跳成功
@@ -311,22 +340,29 @@ public class ShuanQVerifier {
                         saveVerifyState(context);
                         Log.d(TAG, "心跳验证成功");
 
-                        // 解析卡密信息，更新到期时间
+                        // 解析卡密信息，更新到期时间 - 解密data字段
                         try {
-                            JSONObject data = jsonResponse.optJSONObject("data");
-                            if (data != null && data.has("cardInfo")) {
-                                JSONObject cardInfo = data.getJSONObject("cardInfo");
-                                long endTime = cardInfo.optLong("endtime", 0);
-                                if (endTime > 0) {
-                                    // 转换为毫秒
-                                    expireTime = endTime * 1000L;
-                                    saveVerifyState(context);
-                                    Log.d(TAG, "心跳更新到期时间: " + expireTime);
-                                }
-                                // 更新token
-                                String token = cardInfo.optString("token", "");
-                                if (!token.isEmpty()) {
-                                    userToken = token;
+                            String encryptedData = jsonResponse.optString("data", "");
+                            if (!encryptedData.isEmpty()) {
+                                byte[] dataBytes = hexStringToBytes(encryptedData);
+                                String decryptedData = decryptAES(dataBytes, AES_KEY);
+                                Log.d(TAG, "心跳解密后的data: " + decryptedData);
+
+                                JSONObject dataObj = new JSONObject(decryptedData);
+                                if (dataObj.has("cardInfo")) {
+                                    JSONObject cardInfo = dataObj.getJSONObject("cardInfo");
+                                    long endTime = cardInfo.optLong("endtime", 0);
+                                    if (endTime > 0) {
+                                        // 转换为毫秒
+                                        expireTime = endTime * 1000L;
+                                        saveVerifyState(context);
+                                        Log.d(TAG, "心跳更新到期时间: " + expireTime);
+                                    }
+                                    // 更新token
+                                    String token = cardInfo.optString("token", "");
+                                    if (!token.isEmpty()) {
+                                        userToken = token;
+                                    }
                                 }
                             }
                         } catch (Exception e) {
