@@ -356,9 +356,9 @@ public class MainActivity extends Activity {
         locCardLayout.addView(lngEdit);
 
         // 按钮行
-        LinearLayout btnRow = new LinearLayout(this);
-        btnRow.setOrientation(LinearLayout.HORIZONTAL);
-        btnRow.setLayoutParams(new LinearLayout.LayoutParams(
+        LinearLayout locBtnRow = new LinearLayout(this);
+        locBtnRow.setOrientation(LinearLayout.HORIZONTAL);
+        locBtnRow.setLayoutParams(new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         Button mapBtn = new Button(this);
@@ -376,7 +376,7 @@ public class MainActivity extends Activity {
                 showMapPicker();
             }
         });
-        btnRow.addView(mapBtn);
+        locBtnRow.addView(mapBtn);
 
         Button curLocBtn = new Button(this);
         curLocBtn.setText("📍 当前位置");
@@ -393,9 +393,9 @@ public class MainActivity extends Activity {
                 getCurrentLocation();
             }
         });
-        btnRow.addView(curLocBtn);
+        locBtnRow.addView(curLocBtn);
 
-        locCardLayout.addView(btnRow);
+        locCardLayout.addView(locBtnRow);
 
         mainLayout.addView(locCardLayout);
 
