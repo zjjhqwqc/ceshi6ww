@@ -19,6 +19,7 @@ import java.util.HashSet;
 import java.util.Set;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
+import de.robv.android.xposed.IXposedHookZygoteInit;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
@@ -29,10 +30,9 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  * 完全按照原APK逻辑重写
  * 支持微信8.0.74
  */
-public class Hook implements IXposedHookLoadPackage {
+public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
     private static final String TAG = "WxLocationHook";
-    private static final String TARGET_PACKAGE = "com.tencent.mm";
     private static final String PREFS_NAME = "sqwx";
 
     // 配置键名 - 与原APK一致
@@ -68,65 +68,83 @@ public class Hook implements IXposedHookLoadPackage {
     // 是否已执行过hook（和原APK一致，用静态变量确保只执行一次）
     private static boolean hasHooked = false;
 
+    // Zygote初始化（和原APK一致）
+    @Override
+    public void initZygote(StartupParam startupParam) throws Throwable {
+        XposedBridge.log("[WxLocationHook] 【Zygote】initZygote 被调用");
+        Log.e(TAG, "initZygote 被调用: " + startupParam.modulePath);
+        // 原APK中这里创建了XModuleResources，我们暂时不需要
+    }
+
     @Override
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
-        // 【重要】首先输出到Xposed日志，确保LSPosed能捕获到
-        XposedBridge.log("[WxLocationHook] ========================================");
-        XposedBridge.log("[WxLocationHook] 【模块加载】handleLoadPackage 被调用!");
-        XposedBridge.log("[WxLocationHook] 包名: " + lpparam.packageName);
-        XposedBridge.log("[WxLocationHook] 进程名: " + lpparam.processName);
-        XposedBridge.log("[WxLocationHook] =========================================");
+        try {
+            // 【重要】首先输出到Xposed日志，确保LSPosed能捕获到
+            XposedBridge.log("[WxLocationHook] ========================================");
+            XposedBridge.log("[WxLocationHook] 【模块加载】handleLoadPackage 被调用!");
+            XposedBridge.log("[WxLocationHook] 包名: " + lpparam.packageName);
+            XposedBridge.log("[WxLocationHook] 进程名: " + lpparam.processName);
+            XposedBridge.log("[WxLocationHook] =========================================");
 
-        // 同时输出到logcat
-        Log.e(TAG, "========================================");
-        Log.e(TAG, "【LoadPackage】handleLoadPackage 被调用!");
-        Log.e(TAG, "包名: " + lpparam.packageName);
-        Log.e(TAG, "进程名: " + lpparam.processName);
-        Log.e(TAG, "========================================");
+            // 同时输出到logcat
+            Log.e(TAG, "========================================");
+            Log.e(TAG, "【LoadPackage】handleLoadPackage 被调用!");
+            Log.e(TAG, "包名: " + lpparam.packageName);
+            Log.e(TAG, "进程名: " + lpparam.processName);
+            Log.e(TAG, "========================================");
 
-        // 和原APK一致：不判断包名，只确保只执行一次
-        if (hasHooked) {
-            XposedBridge.log("[WxLocationHook] Application is already hook ! !");
-            Log.e(TAG, "Application is already hook ! !");
-            return;
+            // 和原APK一致：不判断包名，只确保只执行一次
+            if (hasHooked) {
+                XposedBridge.log("[WxLocationHook] Application is already hook ! !");
+                Log.e(TAG, "Application is already hook ! !");
+                return;
+            }
+
+            hasHooked = true;
+
+            XposedBridge.log("[WxLocationHook] load wechat Package success !");
+            Log.e(TAG, "load wechat Package success !");
+
+            // Hook Application.attach 获取Context（和原APK完全一致）
+            XposedHelpers.findAndHookMethod(Application.class, "attach", Context.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            try {
+                                XposedBridge.log("[WxLocationHook] Application.attach 已触发!");
+                                Log.e(TAG, "Application is already hook ! !");
+                                appContext = (Context) param.args[0];
+                                // 从Context获取classLoader（和原APK一致：context.getClassLoader()）
+                                classLoader = appContext.getClassLoader();
+                                XposedBridge.log("[WxLocationHook] 获取到Context: " + appContext.getPackageName());
+                                Log.e(TAG, "获取到Context: " + appContext.getPackageName());
+
+                                // 加载配置
+                                loadConfig();
+
+                                // 显示加载完成提示
+                                showLoadedToast();
+
+                                // 开始Hook腾讯地图定位
+                                startTencentMapHook();
+
+                                // 开始Hook菜单
+                                startMenuHook();
+
+                                XposedBridge.log("[WxLocationHook] ========== 所有Hook注册完成 ==========");
+                            } catch (Throwable t) {
+                                XposedBridge.log("[WxLocationHook] Application.attach 回调异常: " + t.getMessage());
+                                Log.e(TAG, "Application.attach 回调异常", t);
+                            }
+                        }
+                    });
+
+            XposedBridge.log("[WxLocationHook] ========== 模块加载初始化完成 ==========");
+            Log.e(TAG, "========== 模块加载初始化完成 ==========");
+        } catch (Throwable t) {
+            XposedBridge.log("[WxLocationHook] handleLoadPackage 异常: " + t.getMessage());
+            Log.e(TAG, "handleLoadPackage 异常", t);
         }
-
-        hasHooked = true;
-
-        XposedBridge.log("[WxLocationHook] load wechat Package success !");
-        Log.e(TAG, "load wechat Package success !");
-
-        // Hook Application.attach 获取Context（和原APK完全一致）
-        XposedHelpers.findAndHookMethod(Application.class, "attach", Context.class,
-                new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        XposedBridge.log("[WxLocationHook] Application.attach 已触发!");
-                        Log.e(TAG, "Application is already hook ! !");
-                        appContext = (Context) param.args[0];
-                        // 从Context获取classLoader（和原APK一致：context.getClassLoader()）
-                        classLoader = appContext.getClassLoader();
-                        XposedBridge.log("[WxLocationHook] 获取到Context: " + appContext.getPackageName());
-                        Log.e(TAG, "获取到Context: " + appContext.getPackageName());
-
-                        // 加载配置
-                        loadConfig();
-
-                        // 显示加载完成提示
-                        showLoadedToast();
-
-                        // 开始Hook腾讯地图定位
-                        startTencentMapHook();
-
-                        // 开始Hook菜单
-                        startMenuHook();
-
-                        XposedBridge.log("[WxLocationHook] ========== 所有Hook注册完成 ==========");
-                    }
-                });
-
-        XposedBridge.log("[WxLocationHook] ========== 模块加载初始化完成 ==========");
-        Log.e(TAG, "========== 模块加载初始化完成 ==========");
     }
 
     // 显示加载完成提示
