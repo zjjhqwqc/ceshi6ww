@@ -81,10 +81,19 @@ public class Hook implements IXposedHookLoadPackage {
         Log.e(TAG, "进程名: " + lpparam.processName);
         Log.e(TAG, "========================================");
 
-        if (!TARGET_PACKAGE.equals(lpparam.packageName)) {
-            XposedBridge.log("[WxLocationHook] 非目标包，跳过: " + lpparam.packageName);
+        // 判断是否是微信进程：检查包名或进程名是否匹配
+        // MIUI系统可能出现包名是com.miui.contentcatcher但进程名是com.tencent.mm的情况
+        boolean isWeChat = TARGET_PACKAGE.equals(lpparam.packageName)
+                || (lpparam.processName != null && lpparam.processName.startsWith(TARGET_PACKAGE));
+
+        if (!isWeChat) {
+            XposedBridge.log("[WxLocationHook] 非目标包，跳过: pkg=" + lpparam.packageName + ", proc=" + lpparam.processName);
             return;
         }
+
+        XposedBridge.log("[WxLocationHook] ========== 微信定位模块开始加载 ==========");
+        XposedBridge.log("[WxLocationHook] 包名: " + lpparam.packageName);
+        XposedBridge.log("[WxLocationHook] 进程名: " + lpparam.processName);
 
         classLoader = lpparam.classLoader;
 
@@ -96,8 +105,10 @@ public class Hook implements IXposedHookLoadPackage {
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            XposedBridge.log("[WxLocationHook] Application.attach 已触发!");
                             Log.e(TAG, "Application is already hook ! !");
                             appContext = (Context) param.args[0];
+                            XposedBridge.log("[WxLocationHook] 获取到Context: " + appContext.getPackageName());
                             Log.e(TAG, "获取到Context: " + appContext.getPackageName());
 
                             // 加载配置
@@ -111,13 +122,18 @@ public class Hook implements IXposedHookLoadPackage {
 
                             // 开始Hook菜单
                             startMenuHook();
+
+                            XposedBridge.log("[WxLocationHook] ========== 所有Hook注册完成 ==========");
                         }
                     });
+            XposedBridge.log("[WxLocationHook] Application.attach Hook注册成功");
             Log.e(TAG, "Application.attach Hook注册成功");
         } catch (Throwable t) {
+            XposedBridge.log("[WxLocationHook] Hook Application.attach失败: " + t.getMessage());
             Log.e(TAG, "Hook Application.attach失败", t);
         }
 
+        XposedBridge.log("[WxLocationHook] ========== 模块加载初始化完成 ==========");
         Log.e(TAG, "========== 模块加载初始化完成 ==========");
     }
 
@@ -154,11 +170,13 @@ public class Hook implements IXposedHookLoadPackage {
                     latitude = data.latitude;
                     longitude = data.longitude;
                     gpsPlace = data.gpsPlace;
+                    XposedBridge.log("[WxLocationHook] 通过ContentProvider读取配置成功: lat=" + latitude + ", lng=" + longitude);
                     Log.e(TAG, "通过ContentProvider读取配置成功");
                     updateXcxCoordinates();
                     return;
                 }
             } catch (Throwable t) {
+                XposedBridge.log("[WxLocationHook] ContentProvider读取失败: " + t.getMessage());
                 Log.e(TAG, "ContentProvider读取失败，尝试SharedPreferences");
             }
 
@@ -170,8 +188,10 @@ public class Hook implements IXposedHookLoadPackage {
             longitude = sp.getString(KEY_LONGITUDE, longitude);
             gpsPlace = sp.getString(KEY_GPS_PLACE, gpsPlace);
             updateXcxCoordinates();
+            XposedBridge.log("[WxLocationHook] 配置已加载(SP), isLocation=" + isLocation + ", lat=" + latitude + ", lng=" + longitude);
             Log.e(TAG, "配置已加载, isLocation=" + isLocation + ", lat=" + latitude + ", lng=" + longitude);
         } catch (Throwable t) {
+            XposedBridge.log("[WxLocationHook] 加载配置失败，使用默认值: " + t.getMessage());
             Log.e(TAG, "加载配置失败，使用默认值（默认开启定位）", t);
             isLocation = true; // 默认开启，便于测试
         }
@@ -181,6 +201,7 @@ public class Hook implements IXposedHookLoadPackage {
     // Hook 腾讯地图定位
     // ==========================================
     private void startTencentMapHook() {
+        XposedBridge.log("[WxLocationHook] start TencentMap...");
         Log.e(TAG, "start TencentMap...");
 
         try {
@@ -195,6 +216,7 @@ public class Hook implements IXposedHookLoadPackage {
             for (String className : tencentClasses) {
                 try {
                     tencentLocationClass = XposedHelpers.findClass(className, classLoader);
+                    XposedBridge.log("[WxLocationHook] 找到定位类: " + className);
                     Log.e(TAG, "(locationClass): " + className);
                     break;
                 } catch (Throwable t) {
@@ -203,6 +225,7 @@ public class Hook implements IXposedHookLoadPackage {
             }
 
             if (tencentLocationClass == null) {
+                XposedBridge.log("[WxLocationHook] TencentMap ClassNotFound --> 启用系统定位Hook");
                 Log.e(TAG, "TencentMap ClassNotFound -->");
                 // 备用：Hook系统定位
                 hookSystemLocation();
