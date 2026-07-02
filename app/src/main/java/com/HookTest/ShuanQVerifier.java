@@ -378,7 +378,7 @@ public class ShuanQVerifier {
             // 通过ContentProvider同步验证状态到微信进程
             try {
                 android.content.ContentValues values = new android.content.ContentValues();
-                values.put("verify_passed", isVerified ? "1" : "0");
+                values.put("verify_passed", isVerified);
                 values.put("verify_card", cardCode);
                 values.put("verify_expire", String.valueOf(expireTime));
                 ConfigProvider.writeConfig(context, values);

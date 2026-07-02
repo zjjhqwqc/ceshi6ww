@@ -65,11 +65,11 @@ public class ConfigProvider extends ContentProvider {
 
         for (String key : projection) {
             if (KEY_LOCATION_ENABLED.equals(key)) {
-                row.add(sp.getBoolean(key, false) ? "1" : "0");
+                row.add(getBoolFromSp(sp, key) ? "1" : "0");
             } else if (KEY_XCX_ENABLED.equals(key)) {
-                row.add(sp.getBoolean(key, false) ? "1" : "0");
+                row.add(getBoolFromSp(sp, key) ? "1" : "0");
             } else if (KEY_VERIFY_PASSED.equals(key)) {
-                row.add(sp.getBoolean(key, false) ? "1" : "0");
+                row.add(getBoolFromSp(sp, key) ? "1" : "0");
             } else {
                 row.add(sp.getString(key, ""));
             }
@@ -129,6 +129,24 @@ public class ConfigProvider extends ContentProvider {
         }
 
         return 1;
+    }
+
+    /**
+     * 从SharedPreferences安全读取布尔值（兼容String类型的"1"/"0"/"true"/"false"）
+     */
+    private static boolean getBoolFromSp(SharedPreferences sp, String key) {
+        try {
+            // 先尝试读取boolean
+            return sp.getBoolean(key, false);
+        } catch (ClassCastException e) {
+            // 如果存储的是String类型，尝试解析
+            try {
+                String val = sp.getString(key, "0");
+                return "1".equals(val) || "true".equalsIgnoreCase(val);
+            } catch (Exception ex) {
+                return false;
+            }
+        }
     }
 
     /**
