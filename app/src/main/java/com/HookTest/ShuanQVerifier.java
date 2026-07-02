@@ -22,6 +22,9 @@ import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Random;
+import java.util.Timer;
+import java.util.TimerTask;
 
 import javax.crypto.Cipher;
 import javax.crypto.spec.SecretKeySpec;
@@ -69,11 +72,12 @@ public class ShuanQVerifier {
         void onFailure(String errorMsg);
     }
 
-    // 心跳相关
-    private static final long HEARTBEAT_INTERVAL = 30 * 60 * 1000L; // 30分钟心跳一次
-    private static Handler heartbeatHandler = null;
-    private static Runnable heartbeatRunnable = null;
+    // 心跳相关（与原SDK一致：Timer + TimerTask，间隔50000ms）
+    private static final int HEARTBEAT_FREQUENCY = 50000; // 心跳频率，50000毫秒=50秒，与原SDK一致
+    private static Timer heartbeatTimer = null;
+    private static TimerTask heartbeatTimerTask = null;
     private static boolean heartbeatRunning = false;
+    private static String userToken = ""; // 用户token，登录成功后获取
 
     /**
      * 初始化验证系统
@@ -99,12 +103,14 @@ public class ShuanQVerifier {
             });
         }
 
-        // 启动心跳检测
-        startHeartbeat(context);
+        // 如果已经验证通过，启动心跳检测
+        if (isVerified && cardCode != null && !cardCode.isEmpty()) {
+            startHeartbeat(context);
+        }
     }
 
     /**
-     * 启动心跳检测
+     * 启动心跳检测（与原SDK一致：Timer方式，50秒一次）
      */
     public static void startHeartbeat(final Context context) {
         if (heartbeatRunning) {
@@ -112,35 +118,47 @@ public class ShuanQVerifier {
             return;
         }
 
-        if (heartbeatHandler == null) {
-            heartbeatHandler = new Handler(Looper.getMainLooper());
+        if (cardCode == null || cardCode.isEmpty()) {
+            Log.d(TAG, "没有卡密，不启动心跳");
+            return;
         }
 
-        if (heartbeatRunnable == null) {
-            heartbeatRunnable = new Runnable() {
-                @Override
-                public void run() {
-                    if (isVerified && cardCode != null && !cardCode.isEmpty()) {
-                        Log.d(TAG, "执行心跳验证...");
-                        heartbeatVerify(context);
+        // 使用Timer + TimerTask，与原SDK实现方式一致
+        final Handler handler = new Handler(Looper.getMainLooper());
+        heartbeatTimer = new Timer();
+        heartbeatTimerTask = new TimerTask() {
+            @Override
+            public void run() {
+                // 在主线程执行
+                handler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (isVerified && cardCode != null && !cardCode.isEmpty()) {
+                            Log.d(TAG, "执行心跳验证...");
+                            heartbeatVerify(context);
+                        }
                     }
-                    // 安排下一次心跳
-                    heartbeatHandler.postDelayed(this, HEARTBEAT_INTERVAL);
-                }
-            };
-        }
+                });
+            }
+        };
 
-        heartbeatHandler.postDelayed(heartbeatRunnable, HEARTBEAT_INTERVAL);
+        // 立即执行第一次，之后每50秒执行一次（与原SDK一致）
+        heartbeatTimer.schedule(heartbeatTimerTask, 0, HEARTBEAT_FREQUENCY);
         heartbeatRunning = true;
-        Log.d(TAG, "心跳检测已启动，间隔: " + (HEARTBEAT_INTERVAL / 60000) + "分钟");
+        Log.d(TAG, "心跳检测已启动，间隔: " + HEARTBEAT_FREQUENCY + "ms (" + (HEARTBEAT_FREQUENCY / 1000) + "秒)");
     }
 
     /**
      * 停止心跳检测
      */
     public static void stopHeartbeat() {
-        if (heartbeatHandler != null && heartbeatRunnable != null) {
-            heartbeatHandler.removeCallbacks(heartbeatRunnable);
+        if (heartbeatTimer != null) {
+            heartbeatTimer.cancel();
+            heartbeatTimer = null;
+        }
+        if (heartbeatTimerTask != null) {
+            heartbeatTimerTask.cancel();
+            heartbeatTimerTask = null;
         }
         heartbeatRunning = false;
         Log.d(TAG, "心跳检测已停止");
@@ -219,6 +237,9 @@ public class ShuanQVerifier {
 
                             saveVerifyState(context);
 
+                            // 验证成功后启动心跳检测
+                            startHeartbeat(context);
+
                             final String info = "卡密: " + card + "\n到期时间: " + expire;
                             handler.post(new Runnable() {
                                 @Override
@@ -249,14 +270,15 @@ public class ShuanQVerifier {
     /**
      * 心跳验证（检查卡密是否仍然有效）
      */
+    /**
+     * 心跳验证（与原SDK一致）
+     * 调用 /api/card_app/get_card_info 接口
+     * 参数包含：card, machine_code, update_active, user_token, request_safe_code
+     */
     public static void heartbeatVerify(final Context context) {
         if (cardCode == null || cardCode.isEmpty()) {
             isVerified = false;
-            return;
-        }
-
-        // 距离上次验证不超过1小时，跳过心跳
-        if (System.currentTimeMillis() - lastVerifyTime < 60 * 60 * 1000L) {
+            stopHeartbeat();
             return;
         }
 
@@ -264,27 +286,65 @@ public class ShuanQVerifier {
             @Override
             public void run() {
                 try {
+                    // 生成随机安全码（与原SDK一致：32位随机字符串）
+                    String requestSafeCode = getRandomString(32);
+
+                    // 构建心跳请求参数（与原SDK一致）
                     HashMap<String, String> params = new HashMap<>();
                     params.put("card", cardCode);
                     params.put("machine_code", getDeviceId(context));
+                    params.put("update_active", "1");
+                    params.put("user_token", userToken);
+                    params.put("request_safe_code", requestSafeCode);
 
+                    // 加密参数并发送请求
                     HashMap<String, String> encryptedParams = encryptParams(params);
                     String response = postRequest(HOST + API_GET_CARD_INFO, encryptedParams);
 
+                    Log.d(TAG, "心跳响应: " + response);
+
+                    // 解析响应
                     JSONObject jsonResponse = new JSONObject(response);
                     int code = jsonResponse.optInt("code", -1);
+                    String msg = jsonResponse.optString("msg", "未知错误");
 
                     if (code == 1) {
+                        // 心跳成功
                         lastVerifyTime = System.currentTimeMillis();
                         saveVerifyState(context);
                         Log.d(TAG, "心跳验证成功");
+
+                        // 解析卡密信息，更新到期时间
+                        try {
+                            JSONObject data = jsonResponse.optJSONObject("data");
+                            if (data != null && data.has("cardInfo")) {
+                                JSONObject cardInfo = data.getJSONObject("cardInfo");
+                                long endTime = cardInfo.optLong("endtime", 0);
+                                if (endTime > 0) {
+                                    // 转换为毫秒
+                                    expireTime = endTime * 1000L;
+                                    saveVerifyState(context);
+                                    Log.d(TAG, "心跳更新到期时间: " + expireTime);
+                                }
+                                // 更新token
+                                String token = cardInfo.optString("token", "");
+                                if (!token.isEmpty()) {
+                                    userToken = token;
+                                }
+                            }
+                        } catch (Exception e) {
+                            Log.e(TAG, "解析心跳卡密信息失败", e);
+                        }
                     } else {
+                        // 心跳失败，卡密失效
                         isVerified = false;
-                        Log.d(TAG, "心跳验证失败，卡密已失效");
+                        stopHeartbeat();
+                        saveVerifyState(context);
+                        Log.d(TAG, "心跳验证失败，卡密已失效: " + msg);
                     }
                 } catch (Exception e) {
                     Log.e(TAG, "心跳验证异常", e);
-                    // 网络异常时不立即失效，保留缓存状态
+                    // 网络异常时不立即失效，保留缓存状态（与原SDK一致，异常时不杀进程）
                 }
             }
         }).start();
@@ -294,10 +354,14 @@ public class ShuanQVerifier {
      * 清除验证状态
      */
     public static void clearVerify(Context context) {
+        // 停止心跳
+        stopHeartbeat();
+
         isVerified = false;
         cardCode = "";
         expireTime = 0;
         lastVerifyTime = 0;
+        userToken = "";
         saveVerifyState(context);
     }
 
@@ -478,6 +542,20 @@ public class ShuanQVerifier {
             result[i] = (byte) Integer.parseInt(hex.substring(index, index + 2), 16);
         }
         return result;
+    }
+
+    /**
+     * 生成随机字符串（与原SDK一致）
+     */
+    public static String getRandomString(int length) {
+        String chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        Random random = new Random();
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < length; i++) {
+            int index = random.nextInt(chars.length());
+            sb.append(chars.charAt(index));
+        }
+        return sb.toString();
     }
 
     /**
