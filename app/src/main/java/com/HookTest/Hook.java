@@ -10,11 +10,11 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
+import android.view.View;
 import android.widget.Toast;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
 import java.util.HashSet;
 import java.util.Set;
 
@@ -26,17 +26,27 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
  * 微信虚拟定位Xposed模块
- * 多层Hook策略：系统定位 + 腾讯地图定位 + 其他定位SDK
- * 设置界面在模块APP主活动中
+ * 完全按照原APK逻辑重写
+ * 支持微信8.0.74
  */
 public class Hook implements IXposedHookLoadPackage {
 
     private static final String TAG = "WxLocationHook";
     private static final String TARGET_PACKAGE = "com.tencent.mm";
+    private static final String PREFS_NAME = "sqwx";
 
-    // 全局状态 - 默认开启，便于测试Hook是否生效
-    private static boolean locationEnabled = true;
-    private static boolean xcxEnabled = false;
+    // 配置键名 - 与原APK一致
+    private static final String KEY_LOCATION_ENABLED = "isLocation";
+    private static final String KEY_XCX_ENABLED = "isX";
+    private static final String KEY_LATITUDE = "latitude";
+    private static final String KEY_LONGITUDE = "longitude";
+    private static final String KEY_GPS_PLACE = "gpsPlace";
+    private static final String KEY_GPS_SWITCH = "gpsSwitch";
+    private static final String KEY_GPS_TEXT = "gpsText";
+
+    // 全局状态
+    private static boolean isLocation = true;  // 默认开启，便于测试
+    private static boolean isX = false;
     private static String latitude = "39.908823";
     private static String longitude = "116.397470";
     private static String gpsPlace = "北京市东城区";
@@ -45,7 +55,7 @@ public class Hook implements IXposedHookLoadPackage {
     private static ClassLoader classLoader = null;
     private static final Handler uiHandler = new Handler(Looper.getMainLooper());
 
-    // 已Hook的回调类（防重复）
+    // 已Hook的回调类
     private static final Set<String> hookedClasses = new HashSet<>();
 
     // 是否已显示加载完成提示
@@ -55,19 +65,15 @@ public class Hook implements IXposedHookLoadPackage {
     private static double xcxLat = 0;
     private static double xcxLng = 0;
 
-    // Hook统计
-    private static int hookCount = 0;
-
     @Override
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
         Log.e(TAG, "========================================");
-        Log.e(TAG, "handleLoadPackage 被调用!");
+        Log.e(TAG, "【LoadPackage】handleLoadPackage 被调用!");
         Log.e(TAG, "包名: " + lpparam.packageName);
         Log.e(TAG, "进程名: " + lpparam.processName);
         Log.e(TAG, "========================================");
 
         if (!TARGET_PACKAGE.equals(lpparam.packageName)) {
-            Log.e(TAG, "不是目标包，跳过");
             return;
         }
 
@@ -81,18 +87,21 @@ public class Hook implements IXposedHookLoadPackage {
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                            Log.e(TAG, "Application.attach 被调用!");
+                            Log.e(TAG, "Application is already hook ! !");
                             appContext = (Context) param.args[0];
                             Log.e(TAG, "获取到Context: " + appContext.getPackageName());
 
-                            // 尝试读取配置
-                            tryLoadConfig();
+                            // 加载配置
+                            loadConfig();
 
                             // 显示加载完成提示
                             showLoadedToast();
 
-                            // 开始Hook定位
-                            startHooking();
+                            // 开始Hook腾讯地图定位
+                            startTencentMapHook();
+
+                            // 开始Hook菜单
+                            startMenuHook();
                         }
                     });
             Log.e(TAG, "Application.attach Hook注册成功");
@@ -101,49 +110,6 @@ public class Hook implements IXposedHookLoadPackage {
         }
 
         Log.e(TAG, "========== 模块加载初始化完成 ==========");
-    }
-
-    private void tryLoadConfig() {
-        try {
-            ConfigProvider.ConfigData data = ConfigProvider.readConfig(appContext);
-            if (data != null) {
-                locationEnabled = data.locationEnabled;
-                xcxEnabled = data.xcxEnabled;
-                if (!isEmpty(data.latitude)) latitude = data.latitude;
-                if (!isEmpty(data.longitude)) longitude = data.longitude;
-                if (!isEmpty(data.gpsPlace)) gpsPlace = data.gpsPlace;
-                Log.e(TAG, "配置读取成功: 定位开关=" + locationEnabled
-                        + ", lat=" + latitude + ", lng=" + longitude);
-            } else {
-                Log.e(TAG, "配置读取返回null，使用默认值（默认开启定位）");
-                locationEnabled = true; // 默认开启，便于测试
-            }
-            updateXcxCoordinates();
-        } catch (Throwable t) {
-            Log.e(TAG, "读取配置异常，使用默认值（默认开启定位）", t);
-            locationEnabled = true; // 默认开启，便于测试
-        }
-    }
-
-    private void startHooking() {
-        Log.e(TAG, "========== 开始Hook定位 ==========");
-
-        // 第1层：Hook系统LocationManager
-        hookSystemLocationManager();
-
-        // 第2层：Hook LocationListener
-        hookLocationListener();
-
-        // 第3层：Hook腾讯地图定位
-        hookTencentLocation();
-
-        // 第4层：Hook百度地图定位
-        hookBaiduLocation();
-
-        // 第5层：Hook高德地图定位
-        hookAmapLocation();
-
-        Log.e(TAG, "========== Hook完成，共Hook " + hookCount + " 个方法 ==========");
     }
 
     // 显示加载完成提示
@@ -155,8 +121,7 @@ public class Hook implements IXposedHookLoadPackage {
             @Override
             public void run() {
                 try {
-                    Toast.makeText(appContext, "功能加载完成 - Hook数量: " + hookCount,
-                            Toast.LENGTH_LONG).show();
+                    Toast.makeText(appContext, "功能加载完成", Toast.LENGTH_LONG).show();
                     Log.e(TAG, "Toast已显示: 功能加载完成");
                 } catch (Throwable t) {
                     Log.e(TAG, "显示Toast失败", t);
@@ -166,306 +131,277 @@ public class Hook implements IXposedHookLoadPackage {
     }
 
     // ==========================================
-    // 第1层：Hook系统LocationManager
+    // 加载配置
     // ==========================================
-    private void hookSystemLocationManager() {
+    @SuppressLint({"ApplySharedPref", "WorldReadableFiles"})
+    private void loadConfig() {
         try {
-            Class<?> lmClass = XposedHelpers.findClass("android.location.LocationManager", null);
-
-            // Hook getLastKnownLocation
+            // 尝试通过ContentProvider读取
             try {
-                XposedHelpers.findAndHookMethod(lmClass, "getLastKnownLocation", String.class,
-                        new XC_MethodHook() {
-                            @Override
-                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                                Log.e(TAG, "[系统定位] getLastKnownLocation 被调用, provider=" + param.args[0]);
-                                if (!locationEnabled) return;
-
-                                Location original = (Location) param.getResult();
-                                Location fake = createFakeLocation(
-                                        original != null ? original.getProvider() : (String) param.args[0]);
-                                param.setResult(fake);
-                                Log.e(TAG, "[系统定位] getLastKnownLocation 已修改: "
-                                        + fake.getLatitude() + ", " + fake.getLongitude());
-                            }
-                        });
-                hookCount++;
-                Log.e(TAG, "[系统定位] getLastKnownLocation Hook成功");
+                ConfigProvider.ConfigData data = ConfigProvider.readConfig(appContext);
+                if (data != null && data.latitude != null && !data.latitude.isEmpty()) {
+                    isLocation = data.locationEnabled;
+                    isX = data.xcxEnabled;
+                    latitude = data.latitude;
+                    longitude = data.longitude;
+                    gpsPlace = data.gpsPlace;
+                    Log.e(TAG, "通过ContentProvider读取配置成功");
+                    updateXcxCoordinates();
+                    return;
+                }
             } catch (Throwable t) {
-                Log.e(TAG, "[系统定位] Hook getLastKnownLocation失败", t);
+                Log.e(TAG, "ContentProvider读取失败，尝试SharedPreferences");
             }
 
-            // Hook requestLocationUpdates (多个重载)
-            String[] requestMethods = {"requestLocationUpdates", "requestSingleUpdate"};
-            for (String methodName : requestMethods) {
+            // 备用：从微信自己的SharedPreferences读取（如果之前保存过）
+            android.content.SharedPreferences sp = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            isLocation = sp.getBoolean(KEY_LOCATION_ENABLED, true);
+            isX = sp.getBoolean(KEY_XCX_ENABLED, false);
+            latitude = sp.getString(KEY_LATITUDE, latitude);
+            longitude = sp.getString(KEY_LONGITUDE, longitude);
+            gpsPlace = sp.getString(KEY_GPS_PLACE, gpsPlace);
+            updateXcxCoordinates();
+            Log.e(TAG, "配置已加载, isLocation=" + isLocation + ", lat=" + latitude + ", lng=" + longitude);
+        } catch (Throwable t) {
+            Log.e(TAG, "加载配置失败，使用默认值（默认开启定位）", t);
+            isLocation = true; // 默认开启，便于测试
+        }
+    }
+
+    // ==========================================
+    // Hook 腾讯地图定位
+    // ==========================================
+    private void startTencentMapHook() {
+        Log.e(TAG, "start TencentMap...");
+
+        try {
+            // 原APK使用的类名：com.tencent.map.geolocation.sapp.TencentLocationManager
+            String[] tencentClasses = {
+                    "com.tencent.map.geolocation.sapp.TencentLocationManager",
+                    "com.tencent.map.geolocation.TencentLocationManager",
+                    "com.tencent.location.TencentLocationManager"
+            };
+
+            Class<?> tencentLocationClass = null;
+            for (String className : tencentClasses) {
                 try {
-                    Method[] methods = lmClass.getDeclaredMethods();
-                    for (final Method method : methods) {
-                        if (!method.getName().equals(methodName)) continue;
-
-                        // 查找LocationListener参数
-                        boolean hasListener = false;
-                        int listenerIndex = -1;
-                        Class<?>[] params = method.getParameterTypes();
-                        for (int i = 0; i < params.length; i++) {
-                            if (LocationListener.class.isAssignableFrom(params[i])) {
-                                hasListener = true;
-                                listenerIndex = i;
-                                break;
-                            }
-                        }
-
-                        if (hasListener) {
-                            final int idx = listenerIndex;
-                            XposedBridge.hookMethod(method, new XC_MethodHook() {
-                                @Override
-                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                    Log.e(TAG, "[系统定位] " + method.getName() + " 被调用");
-                                    if (!locationEnabled) return;
-
-                                    Object listener = param.args[idx];
-                                    if (listener != null) {
-                                        hookLocationListenerObject(listener);
-                                    }
-                                }
-                            });
-                            hookCount++;
-                            Log.e(TAG, "[系统定位] " + method.getName() + " Hook成功");
-                        }
-                    }
+                    tencentLocationClass = XposedHelpers.findClass(className, classLoader);
+                    Log.e(TAG, "(locationClass): " + className);
+                    break;
                 } catch (Throwable t) {
-                    Log.e(TAG, "[系统定位] Hook " + methodName + "失败", t);
+                    // 继续尝试
                 }
             }
 
-            // Hook isProviderEnabled (让定位看起来总是开启的)
-            try {
-                XposedHelpers.findAndHookMethod(lmClass, "isProviderEnabled", String.class,
-                        new XC_MethodHook() {
-                            @Override
-                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                                if (!locationEnabled) return;
-                                param.setResult(true);
-                            }
-                        });
-                hookCount++;
-                Log.e(TAG, "[系统定位] isProviderEnabled Hook成功");
-            } catch (Throwable t) {
-                Log.e(TAG, "[系统定位] Hook isProviderEnabled失败", t);
+            if (tencentLocationClass == null) {
+                Log.e(TAG, "TencentMap ClassNotFound -->");
+                // 备用：Hook系统定位
+                hookSystemLocation();
+                return;
             }
 
-            // Hook getProviders
+            // Hook requestSingleFreshLocation 方法
             try {
-                XposedHelpers.findAndHookMethod(lmClass, "getProviders", boolean.class,
-                        new XC_MethodHook() {
-                            @Override
-                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                                Log.e(TAG, "[系统定位] getProviders 被调用, 返回: " + param.getResult());
-                            }
-                        });
-                hookCount++;
-                Log.e(TAG, "[系统定位] getProviders Hook成功");
+                Method[] methods = tencentLocationClass.getDeclaredMethods();
+                for (final Method method : methods) {
+                    String name = method.getName();
+
+                    // Hook requestSingleFreshLocation
+                    if ("requestSingleFreshLocation".equals(name)) {
+                        try {
+                            XposedBridge.hookMethod(method, new XC_MethodHook() {
+                                @Override
+                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                    Log.e(TAG, "requestSingleFreshLocation 被调用");
+                                    if (!isLocation) return;
+
+                                    // 查找listener参数并Hook
+                                    for (Object arg : param.args) {
+                                        if (arg != null && isLocationListener(arg)) {
+                                            hookTencentLocationListener(arg);
+                                        }
+                                    }
+                                }
+                            });
+                            Log.e(TAG, "Hook requestSingleFreshLocation 成功");
+                        } catch (Throwable t) {
+                            Log.e(TAG, "Hook requestSingleFreshLocation 失败", t);
+                        }
+                    }
+
+                    // Hook requestLocationUpdates
+                    if ("requestLocationUpdates".equals(name)) {
+                        try {
+                            XposedBridge.hookMethod(method, new XC_MethodHook() {
+                                @Override
+                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                    Log.e(TAG, "requestLocationUpdates 被调用");
+                                    if (!isLocation) return;
+
+                                    for (Object arg : param.args) {
+                                        if (arg != null && isLocationListener(arg)) {
+                                            hookTencentLocationListener(arg);
+                                        }
+                                    }
+                                }
+                            });
+                            Log.e(TAG, "Hook requestLocationUpdates 成功");
+                        } catch (Throwable t) {
+                            Log.e(TAG, "Hook requestLocationUpdates 失败", t);
+                        }
+                    }
+                }
+
+                // 同时用hookAllMethods兜底
+                try {
+                    XposedBridge.hookAllMethods(tencentLocationClass, "requestSingleFreshLocation",
+                            new XC_MethodHook() {
+                                @Override
+                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                    Log.e(TAG, "[hookAll] requestSingleFreshLocation 被调用");
+                                    if (!isLocation) return;
+                                    for (Object arg : param.args) {
+                                        if (arg != null && isLocationListener(arg)) {
+                                            hookTencentLocationListener(arg);
+                                        }
+                                    }
+                                }
+                            });
+                    Log.e(TAG, "hookAllMethods requestSingleFreshLocation 成功");
+                } catch (Throwable t) {
+                    Log.e(TAG, "hookAllMethods requestSingleFreshLocation 失败", t);
+                }
+
+                try {
+                    XposedBridge.hookAllMethods(tencentLocationClass, "requestLocationUpdates",
+                            new XC_MethodHook() {
+                                @Override
+                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                    Log.e(TAG, "[hookAll] requestLocationUpdates 被调用");
+                                    if (!isLocation) return;
+                                    for (Object arg : param.args) {
+                                        if (arg != null && isLocationListener(arg)) {
+                                            hookTencentLocationListener(arg);
+                                        }
+                                    }
+                                }
+                            });
+                    Log.e(TAG, "hookAllMethods requestLocationUpdates 成功");
+                } catch (Throwable t) {
+                    Log.e(TAG, "hookAllMethods requestLocationUpdates 失败", t);
+                }
+
             } catch (Throwable t) {
-                Log.e(TAG, "[系统定位] Hook getProviders失败", t);
+                Log.e(TAG, "Hook腾讯定位方法失败", t);
             }
 
-            Log.e(TAG, "[系统定位] LocationManager Hook完成");
+            // Hook腾讯定位对象的getLastKnownLocation等方法
+            try {
+                hookTencentLocationObject(tencentLocationClass);
+            } catch (Throwable t) {
+                Log.e(TAG, "Hook腾讯定位对象失败", t);
+            }
+
+            Log.e(TAG, "start TencentMap... 完成");
         } catch (Throwable t) {
-            Log.e(TAG, "[系统定位] Hook LocationManager失败", t);
+            Log.e(TAG, "TencentMap ClassNotFound -->", t);
+            hookSystemLocation();
         }
     }
 
-    // ==========================================
-    // 第2层：Hook LocationListener接口实现类
-    // ==========================================
-    private void hookLocationListener() {
-        try {
-            // 通过动态代理Hook所有LocationListener
-            // 这里我们在requestLocationUpdates时已经Hook了监听器对象
-            Log.e(TAG, "[定位监听器] 监听器Hook通过requestLocationUpdates实现");
-        } catch (Throwable t) {
-            Log.e(TAG, "[定位监听器] Hook失败", t);
+    // 判断是否是定位监听器
+    private boolean isLocationListener(Object obj) {
+        if (obj == null) return false;
+        Class<?> clazz = obj.getClass();
+        String name = clazz.getName();
+
+        if (name.contains("TencentLocationListener")
+                || name.contains("LocationListener")
+                || name.contains("LocationCallback")
+                || name.contains("listener")
+                || name.contains("callback")) {
+            return true;
         }
+
+        // 检查接口
+        Class<?>[] interfaces = clazz.getInterfaces();
+        for (Class<?> iface : interfaces) {
+            String ifaceName = iface.getName();
+            if (ifaceName.contains("TencentLocationListener")
+                    || ifaceName.contains("LocationListener")) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
-    // Hook具体的LocationListener对象
-    private void hookLocationListenerObject(final Object listener) {
+    // Hook腾讯定位监听器
+    private void hookTencentLocationListener(final Object listener) {
         if (listener == null) return;
 
         String className = listener.getClass().getName();
         if (hookedClasses.contains(className)) {
-            Log.e(TAG, "[定位监听器] 已Hook过: " + className);
             return;
         }
         hookedClasses.add(className);
 
         try {
-            // 查找onLocationChanged方法
             Method[] methods = listener.getClass().getDeclaredMethods();
+            boolean found = false;
+
             for (final Method method : methods) {
-                if ("onLocationChanged".equals(method.getName())
-                        && method.getParameterTypes().length == 1
-                        && method.getParameterTypes()[0] == Location.class) {
+                String name = method.getName();
 
-                    XposedBridge.hookMethod(method, new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            Log.e(TAG, "[定位监听器] onLocationChanged 被调用");
-                            if (!locationEnabled) return;
+                // 查找onLocationChanged方法
+                if (name.contains("onLocationChanged")
+                        || name.contains("onLocation")
+                        || name.contains("locationChanged")) {
 
-                            Location original = (Location) param.args[0];
-                            if (original != null) {
-                                Location fake = createFakeLocation(original.getProvider());
-                                param.args[0] = fake;
-                                Log.e(TAG, "[定位监听器] onLocationChanged 已修改: "
-                                        + fake.getLatitude() + ", " + fake.getLongitude());
-                            }
-                        }
-                    });
-                    hookCount++;
-                    Log.e(TAG, "[定位监听器] Hook成功: " + className + "." + method.getName());
-                }
-            }
-        } catch (Throwable t) {
-            Log.e(TAG, "[定位监听器] Hook失败: " + className, t);
-        }
-    }
-
-    // ==========================================
-    // 第3层：Hook腾讯地图定位
-    // ==========================================
-    private void hookTencentLocation() {
-        String[] tencentClasses = {
-                "com.tencent.map.geolocation.TencentLocationManager",
-                "com.tencent.location.TencentLocationManager",
-                "com.tencent.map.geolocation.a",
-                "com.tencent.location.a",
-                "com.tencent.map.geolocation.TencentLocation",
-                "com.tencent.location.TencentLocation"
-        };
-
-        for (String className : tencentClasses) {
-            try {
-                Class<?> clazz = XposedHelpers.findClass(className, classLoader);
-                Log.e(TAG, "[腾讯定位] 找到类: " + className);
-
-                Method[] methods = clazz.getDeclaredMethods();
-                for (final Method method : methods) {
-                    String name = method.getName();
+                    // 检查是否有Location参数
                     Class<?>[] params = method.getParameterTypes();
-
-                    // 查找包含listener/回调的方法
-                    boolean hasCallback = false;
-                    int callbackIndex = -1;
-                    for (int i = 0; i < params.length; i++) {
-                        String paramName = params[i].getName();
-                        if (paramName.contains("Listener")
-                                || paramName.contains("Callback")
-                                || paramName.contains("listener")
-                                || paramName.contains("callback")) {
-                            hasCallback = true;
-                            callbackIndex = i;
+                    boolean hasLocationParam = false;
+                    for (Class<?> p : params) {
+                        if (p.getName().contains("Location")
+                                || p.getName().contains("location")) {
+                            hasLocationParam = true;
                             break;
                         }
                     }
 
-                    if (hasCallback) {
-                        final int idx = callbackIndex;
+                    if (hasLocationParam || params.length >= 1) {
                         try {
                             XposedBridge.hookMethod(method, new XC_MethodHook() {
                                 @Override
                                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                    Log.e(TAG, "[腾讯定位] " + method.getName() + " 被调用");
-                                    if (!locationEnabled) return;
+                                    Log.e(TAG, "onLocationChanged 被调用: " + method.getName());
+                                    if (!isLocation) return;
 
-                                    Object callback = param.args[idx];
-                                    if (callback != null) {
-                                        hookTencentCallback(callback);
+                                    // 修改第一个位置参数
+                                    for (int i = 0; i < param.args.length; i++) {
+                                        if (param.args[i] != null
+                                                && param.args[i].getClass().getName().contains("Location")) {
+                                            fakeTencentLocation(param.args[i]);
+                                            Log.e(TAG, "修改位置参数 " + i);
+                                            break;
+                                        }
                                     }
                                 }
                             });
-                            hookCount++;
-                            Log.e(TAG, "[腾讯定位] Hook方法成功: " + name);
+                            found = true;
+                            Log.e(TAG, "Hook onLocationChanged 成功: " + className + "." + name);
                         } catch (Throwable t) {
-                            // 忽略单个方法Hook失败
-                        }
-                    }
-
-                    // 查找返回位置对象的方法
-                    if (name.contains("getLast") || name.contains("getLocation")
-                            || name.contains("lastKnown") || name.contains("getCurrent")) {
-                        try {
-                            XposedBridge.hookMethod(method, new XC_MethodHook() {
-                                @Override
-                                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                                    Log.e(TAG, "[腾讯定位] " + method.getName() + " 返回结果");
-                                    if (!locationEnabled) return;
-
-                                    Object result = param.getResult();
-                                    if (result != null) {
-                                        fakeTencentLocation(result);
-                                    }
-                                }
-                            });
-                            hookCount++;
-                            Log.e(TAG, "[腾讯定位] Hook返回方法成功: " + name);
-                        } catch (Throwable t) {
-                            // 忽略
+                            Log.e(TAG, "Hook onLocationChanged 失败: " + name, t);
                         }
                     }
                 }
-            } catch (Throwable t) {
-                // 类不存在，继续下一个
             }
-        }
 
-        Log.e(TAG, "[腾讯定位] Hook完成");
-    }
-
-    // Hook腾讯定位回调
-    private void hookTencentCallback(final Object callback) {
-        if (callback == null) return;
-
-        String className = callback.getClass().getName();
-        if (hookedClasses.contains(className)) {
-            return;
-        }
-        hookedClasses.add(className);
-
-        try {
-            Method[] methods = callback.getClass().getDeclaredMethods();
-            for (final Method method : methods) {
-                String name = method.getName();
-                if (name.contains("Location") || name.contains("location")
-                        || name.contains("Changed") || name.contains("changed")
-                        || name.contains("onStatus") || name.contains("onUpdate")) {
-
-                    try {
-                        XposedBridge.hookMethod(method, new XC_MethodHook() {
-                            @Override
-                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                Log.e(TAG, "[腾讯回调] " + method.getName() + " 被调用");
-                                if (!locationEnabled) return;
-
-                                // 修改所有位置对象参数
-                                for (int i = 0; i < param.args.length; i++) {
-                                    if (param.args[i] != null
-                                            && param.args[i].getClass().getName().contains("Location")) {
-                                        fakeTencentLocation(param.args[i]);
-                                        Log.e(TAG, "[腾讯回调] 修改参数 " + i + " 的位置");
-                                    }
-                                }
-                            }
-                        });
-                        hookCount++;
-                        Log.e(TAG, "[腾讯回调] Hook成功: " + className + "." + name);
-                    } catch (Throwable t) {
-                        // 忽略
-                    }
-                }
+            if (!found) {
+                Log.e(TAG, "onLocationChanged Method not exit ! - " + className);
             }
         } catch (Throwable t) {
-            Log.e(TAG, "[腾讯回调] Hook失败: " + className, t);
+            Log.e(TAG, "Hook腾讯定位监听器失败", t);
         }
     }
 
@@ -476,7 +412,9 @@ public class Hook implements IXposedHookLoadPackage {
             double lat = getLat();
             double lng = getLng();
 
-            // 遍历所有字段，修改经纬度相关的
+            Log.e(TAG, "准备修改定位: lat=" + lat + ", lng=" + lng);
+
+            // 遍历所有字段
             Field[] fields = clazz.getDeclaredFields();
             for (Field field : fields) {
                 String fieldName = field.getName().toLowerCase();
@@ -486,6 +424,7 @@ public class Hook implements IXposedHookLoadPackage {
                         || fieldType == float.class || fieldType == Float.class) {
                     field.setAccessible(true);
 
+                    // 纬度
                     if (fieldName.contains("lat") || fieldName.contains("latitude")
                             || fieldName.equals("a") || fieldName.equals("mLatitude")) {
                         if (fieldType == double.class || fieldType == Double.class) {
@@ -493,9 +432,10 @@ public class Hook implements IXposedHookLoadPackage {
                         } else {
                             field.setFloat(location, (float) lat);
                         }
-                        Log.e(TAG, "[腾讯定位对象] 修改字段 " + field.getName() + " = " + lat);
+                        Log.e(TAG, "设置纬度: " + field.getName() + " = " + lat);
                     }
 
+                    // 经度
                     if (fieldName.contains("lng") || fieldName.contains("longitude")
                             || fieldName.equals("b") || fieldName.equals("mLongitude")) {
                         if (fieldType == double.class || fieldType == Double.class) {
@@ -503,193 +443,292 @@ public class Hook implements IXposedHookLoadPackage {
                         } else {
                             field.setFloat(location, (float) lng);
                         }
-                        Log.e(TAG, "[腾讯定位对象] 修改字段 " + field.getName() + " = " + lng);
+                        Log.e(TAG, "设置经度: " + field.getName() + " = " + lng);
                     }
                 }
             }
-        } catch (Throwable t) {
-            Log.e(TAG, "[腾讯定位对象] 修改失败", t);
-        }
-    }
 
-    // ==========================================
-    // 第4层：Hook百度地图定位
-    // ==========================================
-    private void hookBaiduLocation() {
-        String[] baiduClasses = {
-                "com.baidu.location.BDLocation",
-                "com.baidu.location.LocationClient",
-                "com.baidu.location.f"
-        };
-
-        for (String className : baiduClasses) {
+            // 尝试setter方法
             try {
-                Class<?> clazz = XposedHelpers.findClass(className, classLoader);
-                Log.e(TAG, "[百度定位] 找到类: " + className);
-
-                // Hook所有方法
-                Method[] methods = clazz.getDeclaredMethods();
-                for (final Method method : methods) {
-                    if (method.getParameterTypes().length >= 1) {
-                        // 查找位置对象参数
-                        Class<?>[] params = method.getParameterTypes();
-                        for (int i = 0; i < params.length; i++) {
-                            if (params[i].getName().contains("BDLocation")
-                                    || params[i].getName().contains("Location")) {
-                                final int idx = i;
-                                try {
-                                    XposedBridge.hookMethod(method, new XC_MethodHook() {
-                                        @Override
-                                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                            if (!locationEnabled) return;
-                                            if (param.args[idx] != null) {
-                                                fakeBaiduLocation(param.args[idx]);
-                                            }
-                                        }
-                                    });
-                                    hookCount++;
-                                } catch (Throwable ignored) {}
-                            }
-                        }
-                    }
+                Method setLat = findMethod(clazz, "setLatitude", "setLat", "latitude");
+                if (setLat != null) {
+                    setLat.setAccessible(true);
+                    setLat.invoke(location, lat);
+                    Log.e(TAG, "通过setter设置纬度: " + setLat.getName());
                 }
-            } catch (Throwable t) {
-                // 类不存在
-            }
-        }
 
-        Log.e(TAG, "[百度定位] Hook完成");
-    }
-
-    // 修改百度定位对象
-    private void fakeBaiduLocation(Object location) {
-        try {
-            Class<?> clazz = location.getClass();
-            double lat = getLat();
-            double lng = getLng();
-
-            Field[] fields = clazz.getDeclaredFields();
-            for (Field field : fields) {
-                String fieldName = field.getName().toLowerCase();
-                Class<?> fieldType = field.getType();
-
-                if (fieldType == double.class || fieldType == Double.class
-                        || fieldType == float.class || fieldType == Float.class) {
-                    field.setAccessible(true);
-
-                    if (fieldName.contains("lat") || fieldName.contains("latitude")) {
-                        if (fieldType == double.class || fieldType == Double.class) {
-                            field.setDouble(location, lat);
-                        } else {
-                            field.setFloat(location, (float) lat);
-                        }
-                    }
-                    if (fieldName.contains("lng") || fieldName.contains("longitude")) {
-                        if (fieldType == double.class || fieldType == Double.class) {
-                            field.setDouble(location, lng);
-                        } else {
-                            field.setFloat(location, (float) lng);
-                        }
-                    }
+                Method setLng = findMethod(clazz, "setLongitude", "setLng", "longitude");
+                if (setLng != null) {
+                    setLng.setAccessible(true);
+                    setLng.invoke(location, lng);
+                    Log.e(TAG, "通过setter设置经度: " + setLng.getName());
                 }
-            }
-
-            // 尝试调用setter方法
-            try {
-                Method setLatitude = clazz.getMethod("setLatitude", double.class);
-                setLatitude.invoke(location, lat);
-                Method setLongitude = clazz.getMethod("setLongitude", double.class);
-                setLongitude.invoke(location, lng);
             } catch (Throwable ignored) {}
 
-            Log.e(TAG, "[百度定位对象] 修改成功");
+            Log.e(TAG, "定位修改完成");
         } catch (Throwable t) {
-            Log.e(TAG, "[百度定位对象] 修改失败", t);
+            Log.e(TAG, "修改定位对象失败", t);
+        }
+    }
+
+    // 查找方法
+    private Method findMethod(Class<?> clazz, String... names) {
+        for (String name : names) {
+            try {
+                Method[] methods = clazz.getDeclaredMethods();
+                for (Method m : methods) {
+                    if (m.getName().equalsIgnoreCase(name) && m.getParameterTypes().length == 1) {
+                        Class<?> paramType = m.getParameterTypes()[0];
+                        if (paramType == double.class || paramType == Double.class
+                                || paramType == float.class || paramType == Float.class) {
+                            return m;
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
+        return null;
+    }
+
+    // Hook腾讯定位类的getLast等方法
+    private void hookTencentLocationObject(Class<?> managerClass) {
+        try {
+            // 查找返回位置对象的方法
+            Method[] methods = managerClass.getDeclaredMethods();
+            for (final Method method : methods) {
+                String name = method.getName();
+                Class<?> returnType = method.getReturnType();
+
+                if (returnType != null && returnType.getName().contains("Location")) {
+                    try {
+                        XposedBridge.hookMethod(method, new XC_MethodHook() {
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                                Log.e(TAG, "定位返回方法被调用: " + method.getName());
+                                if (!isLocation) return;
+
+                                Object result = param.getResult();
+                                if (result != null) {
+                                    fakeTencentLocation(result);
+                                }
+                            }
+                        });
+                        Log.e(TAG, "Hook返回方法成功: " + name);
+                    } catch (Throwable t) {
+                        // 忽略
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "Hook腾讯定位对象方法失败", t);
         }
     }
 
     // ==========================================
-    // 第5层：Hook高德地图定位
+    // Hook系统定位（备用）
     // ==========================================
-    private void hookAmapLocation() {
-        String[] amapClasses = {
-                "com.amap.api.location.AMapLocation",
-                "com.amap.api.location.AMapLocationClient",
-                "com.amap.api.location.b"
-        };
+    private void hookSystemLocation() {
+        try {
+            Log.e(TAG, "开始Hook系统定位（备用方案）");
 
-        for (String className : amapClasses) {
+            // Hook getLastKnownLocation
             try {
-                Class<?> clazz = XposedHelpers.findClass(className, classLoader);
-                Log.e(TAG, "[高德定位] 找到类: " + className);
+                XposedHelpers.findAndHookMethod("android.location.LocationManager",
+                        null, "getLastKnownLocation", String.class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                                Log.e(TAG, "[系统定位] getLastKnownLocation 被调用");
+                                if (!isLocation) return;
 
-                Method[] methods = clazz.getDeclaredMethods();
-                for (final Method method : methods) {
-                    Class<?>[] params = method.getParameterTypes();
-                    for (int i = 0; i < params.length; i++) {
-                        if (params[i].getName().contains("AMapLocation")
-                                || params[i].getName().contains("Location")) {
-                            final int idx = i;
+                                Location fake = createFakeLocation((String) param.args[0]);
+                                param.setResult(fake);
+                                Log.e(TAG, "[系统定位] 已修改: " + fake.getLatitude() + ", " + fake.getLongitude());
+                            }
+                        });
+                Log.e(TAG, "[系统定位] getLastKnownLocation Hook成功");
+            } catch (Throwable t) {
+                Log.e(TAG, "[系统定位] Hook getLastKnownLocation失败", t);
+            }
+
+            // Hook requestLocationUpdates
+            try {
+                XposedBridge.hookAllMethods(LocationManager.class, "requestLocationUpdates",
+                        new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                Log.e(TAG, "[系统定位] requestLocationUpdates 被调用");
+                                if (!isLocation) return;
+
+                                for (Object arg : param.args) {
+                                    if (arg instanceof LocationListener) {
+                                        hookSystemLocationListener((LocationListener) arg);
+                                    }
+                                }
+                            }
+                        });
+                Log.e(TAG, "[系统定位] requestLocationUpdates Hook成功");
+            } catch (Throwable t) {
+                Log.e(TAG, "[系统定位] Hook requestLocationUpdates失败", t);
+            }
+
+        } catch (Throwable t) {
+            Log.e(TAG, "Hook系统定位失败", t);
+        }
+    }
+
+    // Hook系统定位监听器
+    private void hookSystemLocationListener(final LocationListener listener) {
+        if (listener == null) return;
+
+        String className = listener.getClass().getName();
+        if (hookedClasses.contains(className)) {
+            return;
+        }
+        hookedClasses.add(className);
+
+        try {
+            XposedBridge.hookAllMethods(listener.getClass(), "onLocationChanged",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            Log.e(TAG, "[系统定位] onLocationChanged 被调用");
+                            if (!isLocation) return;
+
+                            Location original = (Location) param.args[0];
+                            if (original != null) {
+                                Location fake = createFakeLocation(original.getProvider());
+                                param.args[0] = fake;
+                                Log.e(TAG, "[系统定位] 已修改位置");
+                            }
+                        }
+                    });
+            Log.e(TAG, "[系统定位] Hook onLocationChanged成功: " + className);
+        } catch (Throwable t) {
+            Log.e(TAG, "[系统定位] Hook onLocationChanged失败", t);
+        }
+    }
+
+    // ==========================================
+    // Hook菜单（长按+按钮）
+    // ==========================================
+    private void startMenuHook() {
+        Log.e(TAG, "start Menu...");
+
+        try {
+            // Hook PlusActionView - 与原APK一致的类名
+            String[] plusActionViewClasses = {
+                    "com.tencent.mm.ui.HomeUI$PlusActionView",
+                    "com.tencent.mm.ui.HomeUI$b",
+                    "com.tencent.mm.ui.LauncherUI$PlusActionView"
+            };
+
+            Class<?> plusActionViewClass = null;
+            for (String className : plusActionViewClasses) {
+                try {
+                    plusActionViewClass = XposedHelpers.findClass(className, classLoader);
+                    Log.e(TAG, "找到PlusActionView类: " + className);
+                    break;
+                } catch (Throwable t) {
+                    // 继续
+                }
+            }
+
+            if (plusActionViewClass == null) {
+                Log.e(TAG, "PlusActionView is null...");
+                return;
+            }
+
+            // Hook构造函数，设置长按监听
+            try {
+                XposedBridge.hookAllConstructors(plusActionViewClass, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        Log.e(TAG, "PlusActionView构造函数被调用");
+                        try {
+                            Object thisObj = param.thisObject;
+                            View actionView = null;
+
+                            // 尝试获取getActionView方法
                             try {
-                                XposedBridge.hookMethod(method, new XC_MethodHook() {
+                                Method getActionView = thisObj.getClass().getMethod("getActionView");
+                                actionView = (View) getActionView.invoke(thisObj);
+                            } catch (Throwable t) {
+                                // 尝试直接转换为View
+                                if (thisObj instanceof View) {
+                                    actionView = (View) thisObj;
+                                }
+                            }
+
+                            if (actionView != null) {
+                                final View finalView = actionView;
+                                actionView.setOnLongClickListener(new View.OnLongClickListener() {
                                     @Override
-                                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                        if (!locationEnabled) return;
-                                        if (param.args[idx] != null) {
-                                            fakeAmapLocation(param.args[idx]);
-                                        }
+                                    public boolean onLongClick(View v) {
+                                        Log.e(TAG, "PlusActionView 被长按!");
+                                        // 打开设置面板
+                                        openSettingsDialog();
+                                        return true;
                                     }
                                 });
-                                hookCount++;
-                            } catch (Throwable ignored) {}
+                                Log.e(TAG, "PlusActionView 长按监听设置成功");
+                            }
+                        } catch (Throwable t) {
+                            Log.e(TAG, "设置PlusActionView长按监听失败", t);
                         }
+                    }
+                });
+                Log.e(TAG, "PlusActionView构造函数Hook成功");
+            } catch (Throwable t) {
+                Log.e(TAG, "Hook PlusActionView构造函数失败", t);
+            }
+
+            // 备用：Hook HomeUI/LauncherUI的onCreate，查找+按钮
+            try {
+                String[] uiClasses = {
+                        "com.tencent.mm.ui.HomeUI",
+                        "com.tencent.mm.ui.LauncherUI"
+                };
+
+                for (String uiClass : uiClasses) {
+                    try {
+                        Class<?> clazz = XposedHelpers.findClass(uiClass, classLoader);
+                        XposedBridge.hookAllMethods(clazz, "onCreate", new XC_MethodHook() {
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                                Log.e(TAG, uiClass + " onCreate");
+                            }
+                        });
+                        Log.e(TAG, "Hook " + uiClass + " onCreate成功");
+                    } catch (Throwable t) {
+                        // 忽略
                     }
                 }
             } catch (Throwable t) {
-                // 类不存在
+                Log.e(TAG, "Hook UI类失败", t);
             }
-        }
 
-        Log.e(TAG, "[高德定位] Hook完成");
+            Log.e(TAG, "start Menu... 完成");
+        } catch (Throwable t) {
+            Log.e(TAG, "start Menu... 失败", t);
+        }
     }
 
-    // 修改高德定位对象
-    private void fakeAmapLocation(Object location) {
-        try {
-            Class<?> clazz = location.getClass();
-            double lat = getLat();
-            double lng = getLng();
-
-            Field[] fields = clazz.getDeclaredFields();
-            for (Field field : fields) {
-                String fieldName = field.getName().toLowerCase();
-                Class<?> fieldType = field.getType();
-
-                if (fieldType == double.class || fieldType == Double.class
-                        || fieldType == float.class || fieldType == Float.class) {
-                    field.setAccessible(true);
-
-                    if (fieldName.contains("lat") || fieldName.contains("latitude")) {
-                        if (fieldType == double.class || fieldType == Double.class) {
-                            field.setDouble(location, lat);
-                        } else {
-                            field.setFloat(location, (float) lat);
-                        }
-                    }
-                    if (fieldName.contains("lng") || fieldName.contains("longitude")) {
-                        if (fieldType == double.class || fieldType == Double.class) {
-                            field.setDouble(location, lng);
-                        } else {
-                            field.setFloat(location, (float) lng);
-                        }
-                    }
+    // 打开设置对话框
+    private void openSettingsDialog() {
+        // 由于在微信进程中，这里简单显示一个提示
+        // 完整的设置界面在模块APP中
+        uiHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Toast.makeText(appContext,
+                            "请打开模块APP设置虚拟位置", Toast.LENGTH_LONG).show();
+                } catch (Throwable t) {
+                    Log.e(TAG, "显示提示失败", t);
                 }
             }
-
-            Log.e(TAG, "[高德定位对象] 修改成功");
-        } catch (Throwable t) {
-            Log.e(TAG, "[高德定位对象] 修改失败", t);
-        }
+        });
     }
 
     // ==========================================
@@ -698,7 +737,7 @@ public class Hook implements IXposedHookLoadPackage {
 
     private double getLat() {
         try {
-            if (xcxEnabled && xcxLat != 0) return xcxLat;
+            if (isX && xcxLat != 0) return xcxLat;
             return Double.parseDouble(latitude);
         } catch (Throwable e) {
             return 39.908823;
@@ -707,7 +746,7 @@ public class Hook implements IXposedHookLoadPackage {
 
     private double getLng() {
         try {
-            if (xcxEnabled && xcxLng != 0) return xcxLng;
+            if (isX && xcxLng != 0) return xcxLng;
             return Double.parseDouble(longitude);
         } catch (Throwable e) {
             return 116.397470;
@@ -741,9 +780,5 @@ public class Hook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             Log.e(TAG, "更新小程序坐标失败", t);
         }
-    }
-
-    private boolean isEmpty(String s) {
-        return s == null || s.trim().isEmpty();
     }
 }
