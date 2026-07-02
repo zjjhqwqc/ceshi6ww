@@ -1,32 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
-    <uses-permission android:name="android.permission.BLUETOOTH" />
-    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
-    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
+        android:label="Squarebox.wx"
         android:allowBackup="true"
-        android:label="@string/app_name"
         android:supportsRtl="true"
         android:icon="@android:drawable/ic_menu_mylocation">
 
-        <!-- 主界面Activity（LSPosed模块检测需要） -->
+        <!-- 主界面Activity -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:label="@string/app_name">
+            android:label="Squarebox.wx">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -39,18 +29,13 @@
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="微信虚拟定位模块 - 长按右上角+按钮设置" />
+            android:value="微信虚拟定位模块" />
         <meta-data
             android:name="xposedminversion"
-            android:value="82" />
+            android:value="93" />
         <meta-data
             android:name="xposedscope"
-            android:value="com.tencent.mm" />
-
-        <!-- LSPosed 作用域配置 -->
-        <meta-data
-            android:name="lsposedscope"
-            android:value="com.tencent.mm" />
+            android:resource="@array/xposed_scope" />
 
         <!-- 配置共享Provider -->
         <provider

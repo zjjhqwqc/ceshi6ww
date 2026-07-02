@@ -67,6 +67,14 @@ public class Hook implements IXposedHookLoadPackage {
 
     @Override
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
+        // 【重要】首先输出到Xposed日志，确保LSPosed能捕获到
+        XposedBridge.log("[WxLocationHook] ========================================");
+        XposedBridge.log("[WxLocationHook] 【模块加载】handleLoadPackage 被调用!");
+        XposedBridge.log("[WxLocationHook] 包名: " + lpparam.packageName);
+        XposedBridge.log("[WxLocationHook] 进程名: " + lpparam.processName);
+        XposedBridge.log("[WxLocationHook] =========================================");
+
+        // 同时输出到logcat
         Log.e(TAG, "========================================");
         Log.e(TAG, "【LoadPackage】handleLoadPackage 被调用!");
         Log.e(TAG, "包名: " + lpparam.packageName);
@@ -74,6 +82,7 @@ public class Hook implements IXposedHookLoadPackage {
         Log.e(TAG, "========================================");
 
         if (!TARGET_PACKAGE.equals(lpparam.packageName)) {
+            XposedBridge.log("[WxLocationHook] 非目标包，跳过: " + lpparam.packageName);
             return;
         }
 
