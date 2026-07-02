@@ -374,7 +374,7 @@ public class MainActivity extends Activity {
         webSettings.setDomStorageEnabled(true);
         webSettings.setAllowFileAccess(true);
 
-        String mapUrl = "https://apis.map.qq.com/tools/locpicker?search=1&type=0&backurl=http://callback&key=OB4BZ-D4W3U-B7VVO-4PJWW-6TKDJ-WPB77&referer=myapp";
+        String mapUrl = "https://apis.map.qq.com/tools/locpicker?search=1&type=0&backurl=http://callback&key=Q3PBZ-TDH3R-4XEWO-WJUMV-YBAUJ-MQBAS&referer=myapp";
         webView.loadUrl(mapUrl);
 
         webView.setWebViewClient(new WebViewClient() {
