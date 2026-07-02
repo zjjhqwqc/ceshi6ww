@@ -112,6 +112,12 @@ public class ConfigProvider extends ContentProvider {
         }
 
         editor.commit();
+
+        // 通知观察者配置已变化
+        if (getContext() != null) {
+            getContext().getContentResolver().notifyChange(uri, null);
+        }
+
         return 1;
     }
 

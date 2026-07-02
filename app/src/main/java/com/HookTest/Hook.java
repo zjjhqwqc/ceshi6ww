@@ -3,9 +3,11 @@ package com.HookTest;
 import android.annotation.SuppressLint;
 import android.app.Application;
 import android.content.Context;
+import android.database.ContentObserver;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -132,6 +134,9 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                                 // 加载配置
                                 loadConfig();
 
+                                // 注册配置变化观察者，实现实时生效
+                                registerConfigObserver();
+
                                 // 显示加载完成提示
                                 showLoadedToast();
 
@@ -214,6 +219,32 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             XposedBridge.log("[WxLocationHook] 加载配置失败，使用默认值: " + t.getMessage());
             Log.e(TAG, "加载配置失败，使用默认值（默认开启定位）", t);
             isLocation = true; // 默认开启，便于测试
+        }
+    }
+
+    // ==========================================
+    // 注册配置变化观察者（实时生效）
+    // ==========================================
+    private void registerConfigObserver() {
+        try {
+            Uri configUri = Uri.parse("content://" + ConfigProvider.AUTHORITY + "/config");
+            ContentObserver observer = new ContentObserver(getUiHandler()) {
+                @Override
+                public void onChange(boolean selfChange) {
+                    super.onChange(selfChange);
+                    XposedBridge.log("[WxLocationHook] 配置已变化，重新加载...");
+                    Log.e(TAG, "配置已变化，重新加载...");
+                    loadConfig();
+                    XposedBridge.log("[WxLocationHook] 配置重新加载完成: isLocation=" + isLocation + ", lat=" + latitude + ", lng=" + longitude);
+                    Log.e(TAG, "配置重新加载完成: isLocation=" + isLocation + ", lat=" + latitude + ", lng=" + longitude);
+                }
+            };
+            appContext.getContentResolver().registerContentObserver(configUri, true, observer);
+            XposedBridge.log("[WxLocationHook] 配置观察者已注册");
+            Log.e(TAG, "配置观察者已注册");
+        } catch (Throwable t) {
+            XposedBridge.log("[WxLocationHook] 注册配置观察者失败: " + t.getMessage());
+            Log.e(TAG, "注册配置观察者失败", t);
         }
     }
 
